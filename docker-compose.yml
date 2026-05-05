@@ -1,0 +1,9 @@
+services:
+  sam-mcp:
+    build: ./sam_mcp
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./db:/data:ro
+    environment:
+      SAM_DB: /data/sam.db
