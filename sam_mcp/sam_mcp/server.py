@@ -285,7 +285,7 @@ def get_cbip_notes(cnk: str) -> dict[str, Any] | None:
               FROM cbip_mpp p
               JOIN cbip_mp  m ON m.mpcv  = p.mpcv
          LEFT JOIN cbip_hyr h ON h.hyrcv = m.hyrcv
-             WHERE p.inncnk = ?
+             WHERE p.mppcv = ?
             """,
             (cnk,),
         ).fetchone()

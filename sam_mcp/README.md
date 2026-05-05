@@ -66,7 +66,7 @@ uv run sam-mcp-etl-cbip --sql  d:\Git\SAM\exportFr.sql --db d:\Git\SAM\db\sam.db
 
 Re-run both whenever you receive a new SAM export or a new CBIP dump. The
 two datasets are joined at query time via the **CNK** (`dmpp.cnk` ↔
-`cbip_mpp.inncnk`) — SAM provides the regulatory facts, CBIP the editorial
+`cbip_mpp.mppcv`) — SAM provides the regulatory facts, CBIP the editorial
 commentary. The CBIP step is optional; `get_cbip_notes` will simply return
 `None` if the `cbip_*` tables aren't present.
 
