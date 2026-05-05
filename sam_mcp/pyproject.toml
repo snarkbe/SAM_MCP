@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sam-mcp"
+version = "0.1.0"
+description = "MCP server exposing the Belgian SAM v2 medicines dataset over SQLite."
+requires-python = ">=3.10"
+dependencies = [
+    "lxml>=5.0",
+    "mcp>=1.2",
+]
+
+[project.scripts]
+sam-mcp = "sam_mcp.server:main"
+sam-mcp-etl = "sam_mcp.etl:main"
+sam-mcp-etl-cbip = "sam_mcp.etl_cbip:main"
+
+[tool.setuptools.packages.find]
+include = ["sam_mcp*"]
+
+[tool.setuptools.package-data]
+sam_mcp = ["schema.sql"]
+
+[tool.uv]
+package = true
