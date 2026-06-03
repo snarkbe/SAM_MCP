@@ -18,10 +18,10 @@ CBIP dump from <https://www.cbip.be/fr/download>.
 
 ## Quick start
 
-```powershell
-cd d:\Git\SAM\sam_mcp
+```bash
+cd sam_mcp
 uv sync
-uv run sam-mcp-etl --data d:\Git\SAM\xml --db d:\Git\SAM\db\sam.db --with-cbip
+uv run sam-mcp-etl --data ../xml --db ../db/sam.db --with-cbip
 uv run sam-mcp
 ```
 

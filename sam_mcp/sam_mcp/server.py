@@ -22,7 +22,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-DB_PATH = Path(os.environ.get("SAM_DB", "d:/Git/SAM/db/sam.db"))
+DB_PATH = Path(os.environ.get("SAM_DB", "db/sam.db"))
 
 mcp = FastMCP("sam")
 
