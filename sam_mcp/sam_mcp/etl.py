@@ -421,9 +421,9 @@ def find_file(data_dir: Path, prefix: str) -> Path | None:
 
 def main() -> int:
     p = argparse.ArgumentParser(description="Build SAM SQLite DB from XML exports")
-    p.add_argument("--data", type=Path, default=Path("d:/Git/SAM/xml"),
+    p.add_argument("--data", type=Path, default=Path("xml"),
                    help="Directory containing the SAM XML files")
-    p.add_argument("--db", type=Path, default=Path("d:/Git/SAM/db/sam.db"),
+    p.add_argument("--db", type=Path, default=Path("db/sam.db"),
                    help="Output SQLite database path")
     p.add_argument("--today", type=str, default=None,
                    help="Reference date (YYYY-MM-DD). Defaults to today.")
@@ -431,7 +431,7 @@ def main() -> int:
     p.add_argument("--skip-amp", action="store_true")
     p.add_argument("--with-cbip", action="store_true",
                    help="Also load the CBIP/BCFI dump after the SAM build")
-    p.add_argument("--cbip-sql", type=Path, default=Path("d:/Git/SAM/exportFr.sql"),
+    p.add_argument("--cbip-sql", type=Path, default=Path("exportFr.sql"),
                    help="Path to the CBIP pg_dump .sql (used with --with-cbip)")
     args = p.parse_args()
 

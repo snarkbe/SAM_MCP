@@ -27,8 +27,8 @@ they can be added later without schema changes.
 - **CBIP/BCFI repertoire dump** — editorial commentary (chapter intros,
   positioning, prescribing notes): <https://www.cbip.be/fr/download>
 
-Drop the SAM XML files into `d:\Git\SAM\xml\` and the CBIP `exportFr.sql`
-dump into `d:\Git\SAM\` before running the ETL.
+Drop the SAM XML files into `xml/` (at the repo root) and the CBIP `exportFr.sql`
+dump into the repo root before running the ETL.
 
 ## Setup
 
@@ -37,8 +37,8 @@ command creates the virtualenv, resolves dependencies (pinned in
 `uv.lock`), and installs the package in editable mode so changes to any
 `.py` file are picked up without reinstalling:
 
-```powershell
-cd d:\Git\SAM\sam_mcp
+```bash
+cd sam_mcp
 uv sync
 ```
 
@@ -55,13 +55,13 @@ the classic way:
 
 ## Build the database
 
-```powershell
+```bash
 # All-in-one: SAM XML rebuild + CBIP load (~10–20 min)
-uv run sam-mcp-etl --data d:\Git\SAM\xml --db d:\Git\SAM\db\sam.db --with-cbip
+uv run sam-mcp-etl --data ../xml --db ../db/sam.db --with-cbip
 
 # Or run them separately:
-uv run sam-mcp-etl      --data d:\Git\SAM\xml          --db d:\Git\SAM\db\sam.db
-uv run sam-mcp-etl-cbip --sql  d:\Git\SAM\exportFr.sql --db d:\Git\SAM\db\sam.db
+uv run sam-mcp-etl      --data ../xml           --db ../db/sam.db
+uv run sam-mcp-etl-cbip --sql  ../exportFr.sql  --db ../db/sam.db
 ```
 
 Re-run both whenever you receive a new SAM export or a new CBIP dump. The
@@ -105,10 +105,10 @@ server from an arbitrary cwd, so we don't go through `uv run`:
 {
   "mcpServers": {
     "sam": {
-      "command": "d:\\Git\\SAM\\sam_mcp\\.venv\\Scripts\\python.exe",
+      "command": "/path/to/repo/sam_mcp/.venv/bin/python",
       "args": ["-m", "sam_mcp.server"],
       "env": {
-        "SAM_DB": "d:\\Git\\SAM\\db\\sam.db"
+        "SAM_DB": "/path/to/repo/db/sam.db"
       }
     }
   }

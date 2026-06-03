@@ -174,8 +174,8 @@ def run(sql_path: Path, db_path: Path, encoding: str = "utf-8") -> int:
 
 def main() -> int:
     p = argparse.ArgumentParser(description="Load CBIP dump into SAM SQLite DB")
-    p.add_argument("--sql", type=Path, default=Path("d:/Git/SAM/exportFr.sql"))
-    p.add_argument("--db",  type=Path, default=Path("d:/Git/SAM/db/sam.db"))
+    p.add_argument("--sql", type=Path, default=Path("exportFr.sql"))
+    p.add_argument("--db",  type=Path, default=Path("db/sam.db"))
     p.add_argument("--encoding", default="utf-8")
     args = p.parse_args()
     return run(args.sql, args.db, args.encoding)
