@@ -345,8 +345,11 @@ def main() -> None:
                    default=int(os.environ.get("SAM_PORT", "8000")),
                    help="Port for --http (default: 8000)")
     p.add_argument("--allowed-hosts", default=None,
-                   help="Comma-separated allowed Host headers for tunnel/proxy use "
-                        "(e.g. '*.trycloudflare.com,localhost'). Default: no restriction.")
+                   help="Comma-separated allowed Host headers for reverse-proxy use "
+                        "(e.g. 'sam.example.com,localhost'). Default: no restriction.")
+    p.add_argument("--behind-proxy", action="store_true",
+                   help="Trust X-Forwarded-* headers from a reverse proxy (e.g. NPM). "
+                        "Implied when --allowed-hosts is set.")
     args = p.parse_args()
 
     if args.http:
@@ -354,13 +357,17 @@ def main() -> None:
         mcp.settings.port = args.port
         print(f"[sam-mcp] HTTP listening on http://{args.host}:{args.port}/mcp",
               flush=True)
-        if args.allowed_hosts:
+        if args.allowed_hosts or args.behind_proxy:
             import uvicorn
             from starlette.middleware.trustedhost import TrustedHostMiddleware
-            hosts = [h.strip() for h in args.allowed_hosts.split(",")]
-            print(f"[sam-mcp] Allowed hosts: {hosts}", flush=True)
-            app = TrustedHostMiddleware(mcp.streamable_http_app(), allowed_hosts=hosts)
-            uvicorn.run(app, host=args.host, port=args.port)
+            proxy_headers = args.behind_proxy or bool(args.allowed_hosts)
+            app = mcp.streamable_http_app()
+            if args.allowed_hosts:
+                hosts = [h.strip() for h in args.allowed_hosts.split(",")]
+                print(f"[sam-mcp] Allowed hosts: {hosts}", flush=True)
+                app = TrustedHostMiddleware(app, allowed_hosts=hosts)
+            uvicorn.run(app, host=args.host, port=args.port,
+                        proxy_headers=proxy_headers, forwarded_allow_ips="*")
         else:
             mcp.run(transport="streamable-http")
     else:
