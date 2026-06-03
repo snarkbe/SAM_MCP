@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 DB_PATH = Path(os.environ.get("SAM_DB", "db/sam.db"))
 
@@ -88,7 +89,7 @@ def _resolve_to_amp_codes(conn: sqlite3.Connection, ident: str) -> list[str]:
 # Tools
 # --------------------------------------------------------------------------
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
 def search_medicine(query: str, limit: int = 20) -> list[dict[str, Any]]:
     """
     Search Belgian medicines (AMPs) by brand or prescription name.
@@ -112,7 +113,7 @@ def search_medicine(query: str, limit: int = 20) -> list[dict[str, Any]]:
     return [_row_to_dict(r) for r in rows]
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
 def get_medicine(identifier: str) -> dict[str, Any] | None:
     """
     Look up a medicine by CNK (e.g. '3104965') or AMP code (e.g. 'SAM660978-00').
@@ -164,7 +165,7 @@ def get_medicine(identifier: str) -> dict[str, Any] | None:
     }
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
 def get_ingredients(identifier: str) -> list[dict[str, Any]]:
     """
     Return active substances and strengths for a given medicine.
@@ -189,7 +190,7 @@ def get_ingredients(identifier: str) -> list[dict[str, Any]]:
     return [_row_to_dict(r) for r in rows]
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
 def find_by_substance(substance: str, limit: int = 50) -> list[dict[str, Any]]:
     """
     Find all medicines (AMPs) that contain a given active substance.
@@ -222,7 +223,7 @@ def find_by_substance(substance: str, limit: int = 50) -> list[dict[str, Any]]:
     return [_row_to_dict(r) for r in rows]
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
 def get_atc(query: str, limit: int = 20) -> list[dict[str, Any]]:
     """
     Look up an ATC classification by code (exact or prefix) or description.
@@ -252,7 +253,7 @@ def _has_cbip(conn: sqlite3.Connection) -> bool:
     return row is not None
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
 def get_cbip_notes(cnk: str) -> dict[str, Any] | None:
     """
     Return CBIP/BCFI editorial commentary for a Belgian medicine, identified
@@ -313,7 +314,7 @@ def get_cbip_notes(cnk: str) -> dict[str, Any] | None:
         return result
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
 def db_info() -> dict[str, Any]:
     """Return SAM database build info and row counts (for debugging)."""
     with db() as conn:
@@ -343,6 +344,9 @@ def main() -> None:
     p.add_argument("--port", type=int,
                    default=int(os.environ.get("SAM_PORT", "8000")),
                    help="Port for --http (default: 8000)")
+    p.add_argument("--allowed-hosts", default=None,
+                   help="Comma-separated allowed Host headers for tunnel/proxy use "
+                        "(e.g. '*.trycloudflare.com,localhost'). Default: no restriction.")
     args = p.parse_args()
 
     if args.http:
@@ -350,7 +354,15 @@ def main() -> None:
         mcp.settings.port = args.port
         print(f"[sam-mcp] HTTP listening on http://{args.host}:{args.port}/mcp",
               flush=True)
-        mcp.run(transport="streamable-http")
+        if args.allowed_hosts:
+            import uvicorn
+            from starlette.middleware.trustedhost import TrustedHostMiddleware
+            hosts = [h.strip() for h in args.allowed_hosts.split(",")]
+            print(f"[sam-mcp] Allowed hosts: {hosts}", flush=True)
+            app = TrustedHostMiddleware(mcp.streamable_http_app(), allowed_hosts=hosts)
+            uvicorn.run(app, host=args.host, port=args.port)
+        else:
+            mcp.run(transport="streamable-http")
     else:
         mcp.run()
 
