@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -332,6 +333,42 @@ def db_info() -> dict[str, Any]:
     return {"db_path": str(DB_PATH), "meta": meta, "counts": counts}
 
 
+def _log_startup_counts() -> None:
+    """Log row counts for the important tables at startup.
+
+    Writes to stderr: in stdio mode stdout is the JSON-RPC channel, so any
+    diagnostic output must stay off it.
+    """
+    tables = ("amp", "ampp", "dmpp", "amp_ingredient", "substance", "atc")
+    cbip_tables = ("cbip_mp", "cbip_mpp", "cbip_sam")
+    try:
+        with db() as conn:
+            meta = {
+                r["key"]: r["value"]
+                for r in conn.execute("SELECT key, value FROM meta")
+            }
+            counts = {
+                tbl: conn.execute(
+                    f"SELECT COUNT(*) AS n FROM {tbl}"
+                ).fetchone()["n"]
+                for tbl in tables
+            }
+            if _has_cbip(conn):
+                for tbl in cbip_tables:
+                    counts[tbl] = conn.execute(
+                        f"SELECT COUNT(*) AS n FROM {tbl}"
+                    ).fetchone()["n"]
+    except sqlite3.Error as exc:
+        print(f"[sam-mcp] WARNING: could not read DB counts from {DB_PATH}: {exc}",
+              file=sys.stderr, flush=True)
+        return
+
+    built = meta.get("built_at") or "unknown"
+    print(f"[sam-mcp] DB {DB_PATH} (built: {built})", file=sys.stderr, flush=True)
+    summary = ", ".join(f"{tbl}={n}" for tbl, n in counts.items())
+    print(f"[sam-mcp] row counts: {summary}", file=sys.stderr, flush=True)
+
+
 def main() -> None:
     import argparse
 
@@ -351,6 +388,14 @@ def main() -> None:
                    help="Trust X-Forwarded-* headers from a reverse proxy (e.g. NPM). "
                         "Implied when --allowed-hosts is set.")
     args = p.parse_args()
+
+    if not DB_PATH.exists():
+        print(f"[sam-mcp] FATAL: database not found at {DB_PATH}. "
+              f"Run: python -m sam_mcp.etl --data <xml_dir> --db {DB_PATH}",
+              file=sys.stderr, flush=True)
+        raise SystemExit(1)
+
+    _log_startup_counts()
 
     if args.http:
         mcp.settings.host = args.host
