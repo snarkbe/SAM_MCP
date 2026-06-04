@@ -1,14 +1,12 @@
 """
 ETL: stream Belgian SAM v2 XML exports into SQLite.
 
-Reads (in order): REF (ATC + reference data), AMP (actual medicinal products
-with their ingredients, packs and CNKs). Skips reimbursement/Chapter-IV/CMP
-for the first cut — they can be added later without schema changes.
+Reads (in order): REF, AMP, VMP, RMB, NONMEDICINAL, CMP, RML.
 
 Strategy:
-- lxml.iterparse with `tag=` filter so we only stop at <Amp>, <Ampp>, etc.
-- After each top-level element is processed we call .clear() and prune
-  preceding siblings, keeping memory flat regardless of file size.
+- lxml.iterparse with `tag=` filter so we only stop at top-level elements.
+- After each element is processed we call .clear() and prune preceding
+  siblings, keeping memory flat regardless of file size.
 - For every entity we extract its "currently valid" <Data> slice (today
   between from/to). If none is current, fall back to the latest <Data>.
 - Inserts are batched inside one transaction per file.
@@ -30,6 +28,8 @@ SCHEMA = (ROOT / "schema.sql").read_text(encoding="utf-8")
 NS_EXPORT  = "urn:be:fgov:ehealth:samws:v2:export"
 NS_CORE    = "urn:be:fgov:ehealth:samws:v2:core"
 NS_REFDATA = "urn:be:fgov:ehealth:samws:v2:refdata"
+
+XML_LANG = "{http://www.w3.org/XML/1998/namespace}lang"
 
 
 def _local(tag: str) -> str:
@@ -411,6 +411,294 @@ def load_amp(conn: sqlite3.Connection, path: Path, today: date) -> None:
 
 
 # --------------------------------------------------------------------------
+# VMP
+# --------------------------------------------------------------------------
+
+def load_vmp(conn: sqlite3.Connection, path: Path, today: date) -> None:
+    print(f"[VMP] {path.name}")
+    n = 0
+    cur = conn.cursor()
+    for _, elem in etree.iterparse(str(path), events=("end",), huge_tree=True):
+        if _local(elem.tag) != "Vtm":
+            elem.clear()
+            continue
+        data = pick_current_data(elem, today)
+        if data is None:
+            elem.clear()
+            continue
+        name = _multilang(_child(data, "Name"))
+        cur.execute(
+            "INSERT OR REPLACE INTO vtm(code, name_fr, name_nl, valid_from, valid_to)"
+            " VALUES (?,?,?,?,?)",
+            (elem.get("code"), name["Fr"], name["Nl"],
+             data.get("from"), data.get("to")),
+        )
+        n += 1
+        elem.clear()
+    conn.commit()
+    print(f"[VMP] vtm={n}")
+
+
+# --------------------------------------------------------------------------
+# RMB
+# --------------------------------------------------------------------------
+
+def load_rmb(conn: sqlite3.Connection, path: Path, today: date) -> None:
+    print(f"[RMB] {path.name} (streaming)")
+    n = n_crit = 0
+    tag = f"{{{NS_EXPORT}}}ReimbursementContext"
+    cur = conn.cursor()
+    for _, elem in etree.iterparse(str(path), events=("end",), tag=tag, huge_tree=True):
+        data = pick_current_data(elem, today)
+        if data is None:
+            elem.clear()
+            while elem.getprevious() is not None:
+                del elem.getparent()[0]
+            continue
+
+        cnk        = elem.get("code")
+        deliv_env  = elem.get("deliveryEnvironment")
+        legal_ref  = elem.get("legalReferencePath")
+        valid_from = data.get("from")
+        valid_to   = data.get("to")
+
+        def _bool(name: str) -> int:
+            return 1 if (_text(data, name) or "").lower() == "true" else 0
+
+        def _price(name: str) -> float | None:
+            v = _text(data, name)
+            try:
+                return float(v) if v else None
+            except ValueError:
+                return None
+
+        pu = _child(data, "PricingUnit")
+        pu_qty = pu_fr = pu_nl = None
+        if pu is not None:
+            try:
+                pu_qty = float(_text(pu, "Quantity") or "")
+            except ValueError:
+                pu_qty = None
+            label = _multilang(_child(pu, "Label"))
+            pu_fr, pu_nl = label["Fr"], label["Nl"]
+
+        cur.execute(
+            "INSERT OR REPLACE INTO reimbursement("
+            "cnk, delivery_environment, valid_from, valid_to, legal_reference,"
+            " temporary, is_reference, flat_rate_system,"
+            " reimbursement_price, reference_price,"
+            " pricing_unit_qty, pricing_unit_fr, pricing_unit_nl)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (cnk, deliv_env, valid_from, valid_to, legal_ref,
+             _bool("Temporary"), _bool("Reference"), _bool("FlatRateSystem"),
+             _price("ReimbursementBasePrice"), _price("ReferenceBasePrice"),
+             pu_qty, pu_fr, pu_nl),
+        )
+        n += 1
+
+        for crit in _children(data, "ReimbursementCriterion"):
+            desc = _multilang(_child(crit, "Description"))
+            cur.execute(
+                "INSERT OR REPLACE INTO reimbursement_criterion("
+                "cnk, delivery_environment, valid_from, category, code,"
+                " description_fr, description_nl)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (cnk, deliv_env, valid_from,
+                 crit.get("category"), crit.get("code"),
+                 desc["Fr"], desc["Nl"]),
+            )
+            n_crit += 1
+
+        if n % 1000 == 0:
+            conn.commit()
+            print(f"  ... {n} reimbursement records", file=sys.stderr)
+
+        elem.clear()
+        while elem.getprevious() is not None:
+            del elem.getparent()[0]
+
+    conn.commit()
+    print(f"[RMB] reimbursement={n} criteria={n_crit}")
+
+
+# --------------------------------------------------------------------------
+# NONMEDICINAL
+# --------------------------------------------------------------------------
+
+def load_nonmedicinal(conn: sqlite3.Connection, path: Path, today: date) -> None:
+    print(f"[NONMEDICINAL] {path.name}")
+    n = 0
+    cur = conn.cursor()
+    for _, elem in etree.iterparse(str(path), events=("end",), huge_tree=True):
+        if _local(elem.tag) != "NonMedicinalProduct":
+            elem.clear()
+            continue
+        data = pick_current_data(elem, today)
+        if data is None:
+            elem.clear()
+            continue
+        name        = _multilang(_child(data, "Name"))
+        producer    = _multilang(_child(data, "Producer"))
+        distributor = _multilang(_child(data, "Distributor"))
+        cur.execute(
+            "INSERT OR REPLACE INTO nonmedicinal("
+            "code, product_id, name_fr, name_nl, category, commercial_status,"
+            " producer_fr, producer_nl, distributor_fr, distributor_nl,"
+            " valid_from, valid_to)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                elem.get("code"), elem.get("ProductId"),
+                name["Fr"], name["Nl"],
+                _text(data, "Category"), _text(data, "CommercialStatus"),
+                producer["Fr"], producer["Nl"],
+                distributor["Fr"], distributor["Nl"],
+                data.get("from"), data.get("to"),
+            ),
+        )
+        n += 1
+        elem.clear()
+    conn.commit()
+    print(f"[NONMEDICINAL] nonmedicinal={n}")
+
+
+# --------------------------------------------------------------------------
+# CMP
+# --------------------------------------------------------------------------
+
+def load_cmp(conn: sqlite3.Connection, path: Path, today: date) -> None:
+    print(f"[CMP] {path.name}")
+    n = n_syn = 0
+    cur = conn.cursor()
+    for _, elem in etree.iterparse(str(path), events=("end",), huge_tree=True):
+        if _local(elem.tag) != "CompoundingIngredient":
+            elem.clear()
+            continue
+        code = elem.get("code")
+        if not code:
+            elem.clear()
+            continue
+        data = pick_current_data(elem, today)
+        cur.execute(
+            "INSERT OR REPLACE INTO compounding_ingredient(code, product_id, valid_from)"
+            " VALUES (?,?,?)",
+            (code, elem.get("ProductId"),
+             data.get("from") if data is not None else None),
+        )
+        n += 1
+        if data is not None:
+            for syn in _children(data, "Synonym"):
+                lang = syn.get(XML_LANG)
+                rank = syn.get("rank")
+                if lang and rank and syn.text:
+                    cur.execute(
+                        "INSERT OR REPLACE INTO compounding_synonym(code, lang, rank, name)"
+                        " VALUES (?,?,?,?)",
+                        (code, lang, int(rank), syn.text),
+                    )
+                    n_syn += 1
+        elem.clear()
+    conn.commit()
+    print(f"[CMP] ingredients={n} synonyms={n_syn}")
+
+
+# --------------------------------------------------------------------------
+# RML
+# --------------------------------------------------------------------------
+
+def _walk_legal_texts(cur, basis_key: str, ref_key: str,
+                      text_elem, parent_text_key, today: date) -> None:
+    text_key = text_elem.get("key")
+    if not text_key:
+        return
+    data    = pick_current_data(text_elem, today)
+    content = _multilang(_child(data, "Content")) if data else {"Fr": None, "Nl": None}
+    seq     = _text(data, "SequenceNr") if data else None
+    cur.execute(
+        "INSERT OR REPLACE INTO legal_text("
+        "basis_key, ref_key, text_key, parent_text_key,"
+        " content_fr, content_nl, type, sequence_nr, valid_from, valid_to)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (basis_key, ref_key, text_key, parent_text_key,
+         content["Fr"], content["Nl"],
+         _text(data, "Type") if data else None,
+         int(seq) if seq else None,
+         data.get("from") if data else None,
+         data.get("to") if data else None),
+    )
+    for child_text in _children(text_elem, "LegalText"):
+        _walk_legal_texts(cur, basis_key, ref_key, child_text, text_key, today)
+
+
+def _walk_legal_refs(cur, basis_key: str, ref_elem,
+                     parent_ref_key, today: date) -> None:
+    ref_key = ref_elem.get("key")
+    if not ref_key:
+        return
+    data  = pick_current_data(ref_elem, today)
+    title = _multilang(_child(data, "Title")) if data else {"Fr": None, "Nl": None}
+    cur.execute(
+        "INSERT OR REPLACE INTO legal_reference("
+        "basis_key, ref_key, parent_ref_key, title_fr, title_nl,"
+        " type, first_published_on, valid_from, valid_to)"
+        " VALUES (?,?,?,?,?,?,?,?,?)",
+        (basis_key, ref_key, parent_ref_key,
+         title["Fr"], title["Nl"],
+         _text(data, "Type") if data else None,
+         _text(data, "FirstPublishedOn") if data else None,
+         data.get("from") if data else None,
+         data.get("to") if data else None),
+    )
+    for child_ref in _children(ref_elem, "LegalReference"):
+        _walk_legal_refs(cur, basis_key, child_ref, ref_key, today)
+    for text_elem in _children(ref_elem, "LegalText"):
+        _walk_legal_texts(cur, basis_key, ref_key, text_elem, None, today)
+
+
+def load_rml(conn: sqlite3.Connection, path: Path, today: date) -> None:
+    print(f"[RML] {path.name} (streaming)")
+    n_basis = n_ref = 0
+    tag = f"{{{NS_EXPORT}}}LegalBasis"
+    cur = conn.cursor()
+    for _, elem in etree.iterparse(str(path), events=("end",), tag=tag, huge_tree=True):
+        basis_key = elem.get("key")
+        if not basis_key:
+            elem.clear()
+            while elem.getprevious() is not None:
+                del elem.getparent()[0]
+            continue
+
+        data  = pick_current_data(elem, today)
+        title = _multilang(_child(data, "Title")) if data else {"Fr": None, "Nl": None}
+        cur.execute(
+            "INSERT OR REPLACE INTO legal_basis("
+            "key, title_fr, title_nl, type, effective_on, valid_from, valid_to)"
+            " VALUES (?,?,?,?,?,?,?)",
+            (basis_key,
+             title["Fr"], title["Nl"],
+             _text(data, "Type") if data else None,
+             _text(data, "EffectiveOn") if data else None,
+             data.get("from") if data else None,
+             data.get("to") if data else None),
+        )
+        n_basis += 1
+
+        for ref in _children(elem, "LegalReference"):
+            _walk_legal_refs(cur, basis_key, ref, None, today)
+            n_ref += 1
+
+        if n_basis % 500 == 0:
+            conn.commit()
+            print(f"  ... {n_basis} legal bases", file=sys.stderr)
+
+        elem.clear()
+        while elem.getprevious() is not None:
+            del elem.getparent()[0]
+
+    conn.commit()
+    print(f"[RML] legal_basis={n_basis} top_refs={n_ref}")
+
+
+# --------------------------------------------------------------------------
 # entrypoint
 # --------------------------------------------------------------------------
 
@@ -460,6 +748,17 @@ def main() -> int:
             load_amp(conn, amp, today)
         else:
             print("! no AMP file found", file=sys.stderr)
+
+    for prefix, loader in [
+        ("VMP",          load_vmp),
+        ("RMB",          load_rmb),
+        ("NONMEDICINAL", load_nonmedicinal),
+        ("CMP",          load_cmp),
+        ("RML",          load_rml),
+    ]:
+        f = find_file(args.data, prefix)
+        if f:
+            loader(conn, f, today)
 
     # Build AMP FTS contents (already populated row-by-row in load_amp;
     # nothing more needed here, but optimize the FTS index).
