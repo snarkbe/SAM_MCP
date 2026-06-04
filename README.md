@@ -9,6 +9,9 @@ Examples it can answer:
 - "Which molecule does *Symbicort* contain?"
 - "Which medicines contain *salbutamol*?"
 - "What's the CNK 3104965?"
+- "Is *Eliquis 5 mg* reimbursed, and at what base price?"
+- "What are the synonyms for *calcium pantothenate* in the compounding repertoire?"
+- "Which non-medicinal products contain *magnesium*?"
 
 ## Layout
 
@@ -25,14 +28,25 @@ CBIP dump from <https://www.cbip.be/fr/download>.
 
 ## How it works
 
-1. **ETL** — `sam_mcp.etl` streams the XML files (`AMP`, `REF`) into a
-   single SQLite file (`sam.db`) using `lxml.iterparse`. The 1.5 GB AMP file
-   is processed without ever loading it fully into memory.
-2. **Server** — `sam_mcp.server` is a stdio MCP server (FastMCP) that
-   exposes read-only query tools over `sam.db`.
+1. **ETL** — `sam_mcp.etl` streams the SAM XML files into a single SQLite
+   file (`sam.db`) using `lxml.iterparse`. Each file is processed
+   element-by-element with constant memory, regardless of size.
 
-Reimbursement (RMB/RML) and Chapter IV are intentionally deferred for now;
-they can be added later without schema changes.
+   | XML file | Contents imported |
+   |---|---|
+   | `REF` | ATC codes, substances, pharmaceutical forms, routes |
+   | `AMP` | Medicines, ingredients, packs, CNKs |
+   | `VMP` | Virtual Therapeutic Molecules (INN-level groupings) |
+   | `RMB` | Reimbursement contexts: base/reference prices, criteria |
+   | `NONMEDICINAL` | Dietary supplements and other non-medicinal products |
+   | `CMP` | Compounding (magistral) ingredients with multilingual synonyms |
+   | `RML` | Reimbursement law hierarchy (legal bases, references, texts) |
+
+   All seven loaders are optional — the ETL completes cleanly if a file is
+   absent. `CHAPTERIV` and `IMPP` are not yet imported.
+
+2. **Server** — `sam_mcp.server` is a FastMCP server that exposes read-only
+   query tools over `sam.db`.
 
 ## Data sources
 
@@ -196,22 +210,44 @@ no-op — put auth on the reverse proxy if you need it.
 | `get_ingredients(identifier)` | Active substances + strengths only. Answers "what is the dose of X?". |
 | `find_by_substance(substance, limit)` | Reverse lookup: every AMP containing a molecule. |
 | `get_atc(query)` | ATC code/description lookup (exact, prefix, or text). |
+| `get_reimbursement(cnk)` | Reimbursement data for a CNK: base/reference prices, flat-rate flag, delivery environment, criteria. |
+| `search_nonmedicinal(query, limit)` | Search non-medicinal products (dietary supplements, etc.) by name. |
+| `find_compounding(query, limit)` | Find compounding/magistral ingredients by name or synonym. |
+| `get_legal_text(text_key)` | Fetch a reimbursement law text by key (FR/NL content + parent context). |
 | `get_cbip_notes(cnk)` | CBIP/BCFI editorial commentary (chapter intro, positioning, notes) for a given CNK. Returns `None` if outside the CBIP repertoire. |
-| `db_info()` | Build metadata + row counts. |
+| `db_info()` | Build metadata + row counts for all tables. |
 
 ## Schema (high level)
 
 ```
+-- Reference
 substance(code PK, name_fr/nl/en, type)
 atc(code PK, description)
 pharma_form(code PK, name_*)
 route(code PK, name_*)
+vtm(code PK, name_fr/nl)                          -- Virtual Therapeutic Molecules
+
+-- Medicines
 amp(code PK, name_*, status, medicine_type, company, ...)
 amp_component(amp_code, seq) -> form + route
 amp_ingredient(amp_code, component_seq, rank) -> substance + strength
 ampp(cti_extended PK, amp_code, pack info, price)
 dmpp(cnk PK, cti_extended, amp_code)
-amp_fts, substance_fts          -- FTS5 indexes
+amp_fts, substance_fts                            -- FTS5 indexes
+
+-- Reimbursement
+reimbursement(cnk, delivery_environment, valid_from PK, prices, flags)
+reimbursement_criterion(cnk, delivery_environment, valid_from, category, code PK)
+
+-- Non-medicinal & compounding
+nonmedicinal(code PK, name_fr/nl, category, commercial_status, producer/distributor)
+compounding_ingredient(code PK, product_id)
+compounding_synonym(code, lang, rank PK, name)
+
+-- Reimbursement law
+legal_basis(key PK, title_fr/nl, type, effective_on)
+legal_reference(basis_key, ref_key PK, parent_ref_key, title_fr/nl, type)
+legal_text(basis_key, text_key PK, ref_key, content_fr/nl, type, sequence_nr)
 ```
 
 The ETL picks the **currently valid** `<Data>` slice per entity (today
