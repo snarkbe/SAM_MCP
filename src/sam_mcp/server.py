@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 
 DB_PATH = Path(os.environ.get("SAM_DB", "db/sam.db"))
@@ -400,19 +401,29 @@ def main() -> None:
     if args.http:
         mcp.settings.host = args.host
         mcp.settings.port = args.port
+
+        # FastMCP auto-enables DNS-rebinding protection when it's constructed,
+        # because it sees the default localhost host and locks the allow-list
+        # to 127.0.0.1/localhost. Behind a reverse proxy the real Host header
+        # (e.g. sam.reichert.be) is then rejected with HTTP 421. The proxy /
+        # LAN is our trust boundary, so disable that check for HTTP serving;
+        # --allowed-hosts below is the opt-in Host allow-list.
+        mcp.settings.transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=False,
+        )
+
         print(f"[sam-mcp] HTTP listening on http://{args.host}:{args.port}/mcp",
               flush=True)
         if args.allowed_hosts or args.behind_proxy:
             import uvicorn
             from starlette.middleware.trustedhost import TrustedHostMiddleware
-            proxy_headers = args.behind_proxy or bool(args.allowed_hosts)
             app = mcp.streamable_http_app()
             if args.allowed_hosts:
-                hosts = [h.strip() for h in args.allowed_hosts.split(",")]
+                hosts = [h.strip() for h in args.allowed_hosts.split(",") if h.strip()]
                 print(f"[sam-mcp] Allowed hosts: {hosts}", flush=True)
                 app = TrustedHostMiddleware(app, allowed_hosts=hosts)
             uvicorn.run(app, host=args.host, port=args.port,
-                        proxy_headers=proxy_headers, forwarded_allow_ips="*")
+                        proxy_headers=True, forwarded_allow_ips="*")
         else:
             mcp.run(transport="streamable-http")
     else:

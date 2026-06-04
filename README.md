@@ -147,6 +147,46 @@ server from an arbitrary cwd, so we don't go through `uv run`:
 docker compose up --build
 ```
 
+### Behind a reverse proxy (remote access)
+
+To reach the server from outside your LAN — e.g. published at
+`https://sam.example.com/mcp` via Nginx Proxy Manager — run it with:
+
+```
+sam-mcp --http --behind-proxy [--allowed-hosts sam.example.com]
+```
+
+- `--behind-proxy` trusts the proxy's `X-Forwarded-*` headers (correct
+  client IP / scheme).
+- `--allowed-hosts` is an **optional** comma-separated Host allow-list. Omit
+  it to accept any Host (the proxy / network is then your only gate).
+
+> **DNS-rebinding protection & HTTP 421.** FastMCP auto-enables a
+> localhost-only Host check when it starts. Left as-is, every request
+> arriving through a proxy with a public Host header is rejected with
+> `421 Invalid Host header`. In `--http` mode this server disables that
+> built-in check (the proxy is the trust boundary) and uses `--allowed-hosts`
+> instead, so a public hostname works. On the proxy side, forward to the
+> container's `:8000` with **Websockets support enabled**.
+
+Claude Desktop's config file only speaks stdio, so to use a remote URL point
+it at the [`mcp-remote`](https://www.npmjs.com/package/mcp-remote) bridge
+(requires Node.js):
+
+```json
+{
+  "mcpServers": {
+    "sam": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "https://sam.example.com/mcp"]
+    }
+  }
+}
+```
+
+The server has no authentication, so `mcp-remote`'s OAuth discovery is a
+no-op — put auth on the reverse proxy if you need it.
+
 ## Tools exposed
 
 | Tool | Purpose |
