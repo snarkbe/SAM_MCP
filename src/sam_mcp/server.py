@@ -248,11 +248,114 @@ def get_atc(query: str, limit: int = 20) -> list[dict[str, Any]]:
     return [_row_to_dict(r) for r in rows]
 
 
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
+def get_reimbursement(cnk: str) -> list[dict[str, Any]] | None:
+    """
+    Return reimbursement data for a Belgian medicine by CNK.
+    Includes base/reference prices, flat-rate flag, delivery environment and
+    reimbursement criteria (category + description). Returns None if the CNK
+    has no reimbursement record.
+    """
+    cnk = cnk.strip()
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT cnk, delivery_environment, valid_from, valid_to, legal_reference,"
+            " temporary, is_reference, flat_rate_system,"
+            " reimbursement_price, reference_price,"
+            " pricing_unit_qty, pricing_unit_fr, pricing_unit_nl"
+            " FROM reimbursement WHERE cnk = ?",
+            (cnk,),
+        ).fetchall()
+        if not rows:
+            return None
+        results = []
+        for row in rows:
+            entry = _row_to_dict(row)
+            entry["pricing_unit"] = {
+                "quantity":  entry.pop("pricing_unit_qty"),
+                "label_fr":  entry.pop("pricing_unit_fr"),
+                "label_nl":  entry.pop("pricing_unit_nl"),
+            }
+            entry["criteria"] = [_row_to_dict(r) for r in conn.execute(
+                "SELECT category, code, description_fr, description_nl"
+                " FROM reimbursement_criterion"
+                " WHERE cnk = ? AND delivery_environment = ? AND valid_from = ?",
+                (cnk, row["delivery_environment"], row["valid_from"]),
+            ).fetchall()]
+            results.append(entry)
+    return results
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
+def search_nonmedicinal(query: str, limit: int = 20) -> list[dict[str, Any]]:
+    """
+    Search non-medicinal products (dietary supplements, etc.) by name.
+    Returns: list of {code, name_fr, name_nl, category, commercial_status,
+    producer_fr, producer_nl}.
+    """
+    q = f"%{query.strip()}%"
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT code, name_fr, name_nl, category, commercial_status,"
+            " producer_fr, producer_nl"
+            " FROM nonmedicinal"
+            " WHERE name_fr LIKE ? OR name_nl LIKE ?"
+            " ORDER BY name_fr LIMIT ?",
+            (q, q, max(1, min(limit, 100))),
+        ).fetchall()
+    return [_row_to_dict(r) for r in rows]
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
+def find_compounding(query: str, limit: int = 20) -> list[dict[str, Any]]:
+    """
+    Find compounding (magistral) ingredients by name or synonym.
+    Returns: list of {code, synonyms: [{lang, rank, name}]}.
+    """
+    q = f"%{query.strip()}%"
+    with db() as conn:
+        codes = [r["code"] for r in conn.execute(
+            "SELECT DISTINCT code FROM compounding_synonym WHERE name LIKE ? LIMIT ?",
+            (q, max(1, min(limit, 100))),
+        ).fetchall()]
+        if not codes:
+            return []
+        results = []
+        for code in codes:
+            syns = [_row_to_dict(r) for r in conn.execute(
+                "SELECT lang, rank, name FROM compounding_synonym"
+                " WHERE code = ? ORDER BY lang, rank",
+                (code,),
+            ).fetchall()]
+            results.append({"code": code, "synonyms": syns})
+    return results
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
+def get_legal_text(text_key: str) -> dict[str, Any] | None:
+    """
+    Fetch a reimbursement law text by its key (e.g. '3051').
+    Returns content in French and Dutch, text type, sequence number and the
+    parent legal reference and basis for context.
+    """
+    with db() as conn:
+        row = conn.execute(
+            "SELECT basis_key, ref_key, text_key, parent_text_key,"
+            " content_fr, content_nl, type, sequence_nr"
+            " FROM legal_text WHERE text_key = ?",
+            (text_key.strip(),),
+        ).fetchone()
+    return _row_to_dict(row) if row else None
+
+
+def _has_table(conn: sqlite3.Connection, name: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+    ).fetchone() is not None
+
+
 def _has_cbip(conn: sqlite3.Connection) -> bool:
-    row = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='cbip_mpp'"
-    ).fetchone()
-    return row is not None
+    return _has_table(conn, "cbip_mpp")
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
@@ -325,6 +428,13 @@ def db_info() -> dict[str, Any]:
         for tbl in ("amp", "ampp", "dmpp", "amp_ingredient",
                     "substance", "atc", "pharma_form", "route"):
             counts[tbl] = conn.execute(f"SELECT COUNT(*) AS n FROM {tbl}").fetchone()["n"]
+        for tbl in ("vtm", "reimbursement", "reimbursement_criterion",
+                    "nonmedicinal", "compounding_ingredient",
+                    "legal_basis", "legal_reference", "legal_text"):
+            if _has_table(conn, tbl):
+                counts[tbl] = conn.execute(
+                    f"SELECT COUNT(*) AS n FROM {tbl}"
+                ).fetchone()["n"]
         if _has_cbip(conn):
             for tbl in ("cbip_mp", "cbip_mpp", "cbip_hyr",
                         "cbip_innm", "cbip_sam"):
