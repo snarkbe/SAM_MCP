@@ -101,6 +101,18 @@ uv run sam-mcp --http
 `--port` (or `SAM_HOST` / `SAM_PORT`) override the defaults. To restrict
 to localhost only, pass `--host 127.0.0.1`.
 
+On startup the server checks that the database exists: if it's missing it
+prints a `FATAL` message and exits non-zero (so a misconfigured `SAM_DB`
+fails loudly instead of serving tools that error on every call). Otherwise
+it logs the DB path, build timestamp, and row counts for the key tables.
+These diagnostics go to **stderr** — in stdio mode stdout carries the
+JSON-RPC protocol — so look for them in Claude Desktop's MCP logs:
+
+```
+[sam-mcp] DB db\sam.db (built: 2026-06-04 06:37:42)
+[sam-mcp] row counts: amp=19841, ampp=100191, dmpp=25559, amp_ingredient=27398, substance=14335, atc=7231, cbip_mp=3510, cbip_mpp=8758, cbip_sam=10454
+```
+
 > ⚠️ **LAN exposure** — the server has no authentication. The DB is open
 > read-only, so the worst-case is information disclosure (medicine
 > data, all of it public anyway). Don't expose it past your trusted LAN
