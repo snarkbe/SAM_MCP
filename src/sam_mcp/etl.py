@@ -611,8 +611,8 @@ def _walk_legal_texts(cur, basis_key: str, ref_key: str,
     if not text_key:
         return
     data    = pick_current_data(text_elem, today)
-    content = _multilang(_child(data, "Content")) if data else {"Fr": None, "Nl": None}
-    seq     = _text(data, "SequenceNr") if data else None
+    content = _multilang(_child(data, "Content")) if data is not None else {"Fr": None, "Nl": None}
+    seq     = _text(data, "SequenceNr") if data is not None else None
     cur.execute(
         "INSERT OR REPLACE INTO legal_text("
         "basis_key, ref_key, text_key, parent_text_key,"
@@ -620,10 +620,10 @@ def _walk_legal_texts(cur, basis_key: str, ref_key: str,
         " VALUES (?,?,?,?,?,?,?,?,?,?)",
         (basis_key, ref_key, text_key, parent_text_key,
          content["Fr"], content["Nl"],
-         _text(data, "Type") if data else None,
+         _text(data, "Type") if data is not None else None,
          int(seq) if seq else None,
-         data.get("from") if data else None,
-         data.get("to") if data else None),
+         data.get("from") if data is not None else None,
+         data.get("to") if data is not None else None),
     )
     for child_text in _children(text_elem, "LegalText"):
         _walk_legal_texts(cur, basis_key, ref_key, child_text, text_key, today)
@@ -635,7 +635,7 @@ def _walk_legal_refs(cur, basis_key: str, ref_elem,
     if not ref_key:
         return
     data  = pick_current_data(ref_elem, today)
-    title = _multilang(_child(data, "Title")) if data else {"Fr": None, "Nl": None}
+    title = _multilang(_child(data, "Title")) if data is not None else {"Fr": None, "Nl": None}
     cur.execute(
         "INSERT OR REPLACE INTO legal_reference("
         "basis_key, ref_key, parent_ref_key, title_fr, title_nl,"
@@ -643,10 +643,10 @@ def _walk_legal_refs(cur, basis_key: str, ref_elem,
         " VALUES (?,?,?,?,?,?,?,?,?)",
         (basis_key, ref_key, parent_ref_key,
          title["Fr"], title["Nl"],
-         _text(data, "Type") if data else None,
-         _text(data, "FirstPublishedOn") if data else None,
-         data.get("from") if data else None,
-         data.get("to") if data else None),
+         _text(data, "Type") if data is not None else None,
+         _text(data, "FirstPublishedOn") if data is not None else None,
+         data.get("from") if data is not None else None,
+         data.get("to") if data is not None else None),
     )
     for child_ref in _children(ref_elem, "LegalReference"):
         _walk_legal_refs(cur, basis_key, child_ref, ref_key, today)
@@ -668,17 +668,17 @@ def load_rml(conn: sqlite3.Connection, path: Path, today: date) -> None:
             continue
 
         data  = pick_current_data(elem, today)
-        title = _multilang(_child(data, "Title")) if data else {"Fr": None, "Nl": None}
+        title = _multilang(_child(data, "Title")) if data is not None else {"Fr": None, "Nl": None}
         cur.execute(
             "INSERT OR REPLACE INTO legal_basis("
             "key, title_fr, title_nl, type, effective_on, valid_from, valid_to)"
             " VALUES (?,?,?,?,?,?,?)",
             (basis_key,
              title["Fr"], title["Nl"],
-             _text(data, "Type") if data else None,
-             _text(data, "EffectiveOn") if data else None,
-             data.get("from") if data else None,
-             data.get("to") if data else None),
+             _text(data, "Type") if data is not None else None,
+             _text(data, "EffectiveOn") if data is not None else None,
+             data.get("from") if data is not None else None,
+             data.get("to") if data is not None else None),
         )
         n_basis += 1
 
