@@ -4,7 +4,7 @@ RUN pip install --no-cache-dir uv
 
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
-COPY sam_mcp/ sam_mcp/
+COPY src/ src/
 
 RUN uv sync --frozen --no-dev
 

@@ -1,6 +1,6 @@
 services:
   sam-mcp:
-    build: ./sam_mcp
+    build: .
     ports:
       - "8000:8000"
     volumes:

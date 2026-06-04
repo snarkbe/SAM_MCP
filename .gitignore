@@ -17,6 +17,10 @@ env/
 db/
 xml/
 exportFr.sql
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
 
 # --- IDE / OS ---
 .vscode/
