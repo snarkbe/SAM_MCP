@@ -24,6 +24,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
+from starlette.responses import JSONResponse
 
 DB_PATH = Path(os.environ.get("SAM_DB", "db/sam.db"))
 
@@ -480,6 +481,32 @@ def _log_startup_counts() -> None:
     print(f"[sam-mcp] row counts: {summary}", file=sys.stderr, flush=True)
 
 
+async def _status_handler(request) -> JSONResponse:
+    """HTTP GET /status — DB build metadata and per-table row counts."""
+    try:
+        with db() as conn:
+            meta = {r["key"]: r["value"] for r in conn.execute("SELECT key, value FROM meta")}
+            counts: dict[str, int] = {}
+            for tbl in ("amp", "ampp", "dmpp", "amp_ingredient",
+                        "substance", "atc", "pharma_form", "route"):
+                counts[tbl] = conn.execute(f"SELECT COUNT(*) AS n FROM {tbl}").fetchone()["n"]
+            for tbl in ("vtm", "reimbursement", "reimbursement_criterion",
+                        "nonmedicinal", "compounding_ingredient",
+                        "legal_basis", "legal_reference", "legal_text"):
+                if _has_table(conn, tbl):
+                    counts[tbl] = conn.execute(
+                        f"SELECT COUNT(*) AS n FROM {tbl}"
+                    ).fetchone()["n"]
+            if _has_cbip(conn):
+                for tbl in ("cbip_mp", "cbip_mpp", "cbip_hyr", "cbip_innm", "cbip_sam"):
+                    counts[tbl] = conn.execute(
+                        f"SELECT COUNT(*) AS n FROM {tbl}"
+                    ).fetchone()["n"]
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    return JSONResponse({"meta": meta, "counts": counts})
+
+
 def main() -> None:
     import argparse
 
@@ -509,8 +536,8 @@ def main() -> None:
     _log_startup_counts()
 
     if args.http:
-        mcp.settings.host = args.host
-        mcp.settings.port = args.port
+        import uvicorn
+        from starlette.routing import Route
 
         # FastMCP auto-enables DNS-rebinding protection when it's constructed,
         # because it sees the default localhost host and locks the allow-list
@@ -522,12 +549,16 @@ def main() -> None:
             enable_dns_rebinding_protection=False,
         )
 
+        # Inject /status into the MCP app's own router so its lifespan
+        # (task group init) is preserved — wrapping in a new Starlette app
+        # would orphan the lifespan and cause a 500 on /mcp.
+        app = mcp.streamable_http_app()
+        app.router.routes.insert(0, Route("/status", _status_handler))
+
         print(f"[sam-mcp] HTTP listening on http://{args.host}:{args.port}/mcp",
               flush=True)
         if args.allowed_hosts or args.behind_proxy:
-            import uvicorn
             from starlette.middleware.trustedhost import TrustedHostMiddleware
-            app = mcp.streamable_http_app()
             if args.allowed_hosts:
                 hosts = [h.strip() for h in args.allowed_hosts.split(",") if h.strip()]
                 print(f"[sam-mcp] Allowed hosts: {hosts}", flush=True)
@@ -535,8 +566,10 @@ def main() -> None:
             uvicorn.run(app, host=args.host, port=args.port,
                         proxy_headers=True, forwarded_allow_ips="*")
         else:
-            mcp.run(transport="streamable-http")
+            uvicorn.run(app, host=args.host, port=args.port)
     else:
+        print("[sam-mcp] stdio mode — ready for JSON-RPC on stdin/stdout",
+              file=sys.stderr, flush=True)
         mcp.run()
 
 
