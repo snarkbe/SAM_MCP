@@ -4,6 +4,8 @@ Local MCP server that answers questions about Belgian medicines from the
 official SAM v2 XML exports (FAGG/AFMPS, eHealth), plus CBIP/BCFI editorial
 commentary.
 
+**SAM** = *Source Authentique des Médicaments* (Authentic Source of Medicines)
+
 Examples it can answer:
 - "What is the dose of *Dafalgan 500*?"
 - "Which molecule does *Symbicort* contain?"
