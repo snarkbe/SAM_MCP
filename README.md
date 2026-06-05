@@ -203,6 +203,45 @@ it at the [`mcp-remote`](https://www.npmjs.com/package/mcp-remote) bridge
 The server has no authentication, so `mcp-remote`'s OAuth discovery is a
 no-op — put auth on the reverse proxy if you need it.
 
+## Automatic database updates
+
+`scripts/refresh-sam.sh` is a production script that runs nightly to keep the
+database in sync with the latest SAM and CBIP exports. It works on any Linux
+host with Docker and curl/unzip (no Python needed on the host).
+
+The script:
+1. **Checks for new SAM exports** — queries the official SAM API for the latest
+   version, downloads it if newer than the cached version.
+2. **Checks for updated CBIP dumps** — detects the newest French SQL edition
+   (released ~monthly), downloads if different from the cached edition.
+3. **Rebuilds the database in a throwaway container** — runs `sam-mcp-etl` in a
+   temporary Docker container with the new data (10–20 min).
+4. **Atomically swaps the database** — stops the running server, replaces the
+   old `sam.db` with the new one, clears stale WAL sidecars, and restarts.
+
+### Install on Unraid
+
+1. Place `scripts/refresh-sam.sh` in a persistent location (e.g.
+   `/mnt/user/scripts/refresh-sam.sh`). Make it executable: `chmod +x`.
+2. Edit the script's **config section** (lines 17–34) to match your setup:
+   - `APPDATA` — your app data folder (default: `/mnt/user/appdata/sam-mcp`)
+   - `CONTAINER` — your sam-mcp container name
+   - `IMAGE` — your sam-mcp image (default: `snarkbe/sam-mcp:latest`)
+   - `ENABLE_CBIP` — set to 1 to auto-load CBIP updates, 0 to skip
+3. Open the **User Scripts** plugin in Unraid and create a **New Script**.
+4. Paste the contents of `refresh-sam.sh` (or reference the file).
+5. Set the schedule to **Custom** with cron syntax `30 4 * * *` (4:30 AM daily).
+
+### Install on plain Linux
+
+1. Copy `scripts/refresh-sam.sh` to your desired location (e.g. `/opt/sam-mcp/refresh-sam.sh`).
+2. Make it executable: `chmod +x /opt/sam-mcp/refresh-sam.sh`
+3. Edit the script's config section to match your setup.
+4. Add to crontab with `crontab -e`:
+   ```
+   30 4 * * *  /opt/sam-mcp/refresh-sam.sh >> /var/log/refresh-sam.log 2>&1
+   ```
+
 ## Tools exposed
 
 | Tool | Purpose |
