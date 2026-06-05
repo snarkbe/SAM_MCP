@@ -480,6 +480,30 @@ def _log_startup_counts() -> None:
     summary = ", ".join(f"{tbl}={n}" for tbl, n in counts.items())
     print(f"[sam-mcp] row counts: {summary}", file=sys.stderr, flush=True)
 
+_TABLE_DESCRIPTIONS = {
+    "amp": "Actual Medicinal Product - marketed medicine (brand + strength + company)",
+    "ampp": "Actual Medicinal Product Package - specific pack of an AMP",
+    "dmpp": "Dispensed Medicinal Product Package - pack at dispensing/CNK level with price/reimbursement data",
+    "amp_ingredient": "Link rows between an AMP and its active substances",
+    "substance": "Active substances (molecule reference list)",
+    "atc": "ATC classification codes (Anatomical Therapeutic Chemical)",
+    "pharma_form": "Pharmaceutical forms (tablet, syrup, gel, etc.)",
+    "route": "Routes of administration (oral, IV, cutaneous, etc.)",
+    "vtm": "Virtual Therapeutic Moiety - abstract molecule concept",
+    "reimbursement": "Reimbursement records (base/reference price, flat-rate flag, per pack)",
+    "reimbursement_criterion": "Reimbursement criteria (category and conditions)",
+    "nonmedicinal": "Non-medicinal products and supplements",
+    "compounding_ingredient": "Ingredients for magistral/compounded preparations",
+    "legal_basis": "Root legal bases (legal foundation)",
+    "legal_reference": "Legal references (specific articles/paragraphs)",
+    "legal_text": "Legal texts (French and Dutch)",
+    "cbip_mp": "Medicinal Product as annotated by CBIP/BCFI",
+    "cbip_mpp": "Medicinal Product Package as annotated by CBIP/BCFI",
+    "cbip_hyr": "CBIP therapeutic hierarchy and chapters",
+    "cbip_innm": "INN/generic names as listed by CBIP",
+    "cbip_sam": "CBIP-to-SAM mapping table",
+}
+
 
 async def _status_handler(request) -> JSONResponse:
     """HTTP GET /status — DB build metadata and per-table row counts."""
@@ -504,7 +528,11 @@ async def _status_handler(request) -> JSONResponse:
                     ).fetchone()["n"]
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
-    return JSONResponse({"meta": meta, "counts": counts})
+    tables = {
+        tbl: {"count": n, "description": _TABLE_DESCRIPTIONS.get(tbl, "")}
+        for tbl, n in counts.items()
+    }
+    return JSONResponse({"meta": meta, "tables": tables})
 
 
 def main() -> None:
