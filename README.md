@@ -7,6 +7,7 @@ commentary.
 **SAM** = *Source Authentique des Médicaments* (Authentic Source of Medicines)
 
 Examples it can answer:
+
 - "What is the dose of *Dafalgan 500*?"
 - "Which molecule does *Symbicort* contain?"
 - "Which medicines contain *salbutamol*?"
@@ -17,12 +18,12 @@ Examples it can answer:
 
 ## Layout
 
-| Path | What's there |
-|---|---|
-| `src/sam_mcp/` | Python package — ETL + MCP server. |
-| `db/sam.db` | SQLite database produced by the ETL (gitignored). |
-| `xml/` | SAM v2 XML exports (gitignored — drop the official files here). |
-| `exportFr.sql` | CBIP/BCFI repertoire dump (gitignored). |
+ | Path | What's there |
+ | --- | --- |  
+ | `src/sam_mcp/` | Python package — ETL + MCP server. |
+ | `db/sam.db` | SQLite database produced by the ETL (gitignored). |
+ | `xml/` | SAM v2 XML exports (gitignored — drop the official files here). |
+ | `exportFr.sql` | CBIP/BCFI repertoire dump (gitignored). |
 
 Source data lives outside git because it's large and regenerable. Get the
 XML from <https://www.vas.ehealth.fgov.be/websamcivics/samcivics/> and the
@@ -35,7 +36,7 @@ CBIP dump from <https://www.cbip.be/fr/download>.
    element-by-element with constant memory, regardless of size.
 
    | XML file | Contents imported |
-   |---|---|
+   | --- | --- |
    | `REF` | ATC codes, substances, pharmaceutical forms, routes |
    | `AMP` | Medicines, ingredients, packs, CNKs |
    | `VMP` | Virtual Therapeutic Molecules (INN-level groupings) |
@@ -124,7 +125,7 @@ it logs the DB path, build timestamp, and row counts for the key tables.
 These diagnostics go to **stderr** — in stdio mode stdout carries the
 JSON-RPC protocol — so look for them in Claude Desktop's MCP logs:
 
-```
+```text
 [sam-mcp] DB db\sam.db (built: 2026-06-04 06:37:42)
 [sam-mcp] row counts: amp=19841, ampp=100191, dmpp=25559, amp_ingredient=27398, substance=14335, atc=7231, cbip_mp=3510, cbip_mpp=8758, cbip_sam=10454
 ```
@@ -138,9 +139,11 @@ JSON-RPC protocol — so look for them in Claude Desktop's MCP logs:
 ### Wire it into Claude Desktop / Claude Code
 
 Add to your MCP config (Claude Desktop: `claude_desktop_config.json`,
-Claude Code: `claude_code_config.json` or `settings.json`). Point
-`command` directly at the venv's interpreter — Claude Desktop launches the
-server from an arbitrary cwd, so we don't go through `uv run`:
+Claude Code: `~/.claude/settings.json`). Point `command` directly at the
+venv's interpreter — Claude Desktop launches the server from an arbitrary
+cwd, so we don't go through `uv run`:
+
+Linux / macOS:
 
 ```json
 {
@@ -150,6 +153,22 @@ server from an arbitrary cwd, so we don't go through `uv run`:
       "args": ["-m", "sam_mcp.server"],
       "env": {
         "SAM_DB": "/path/to/repo/db/sam.db"
+      }
+    }
+  }
+}
+```
+
+Windows (use the `.venv\Scripts\python.exe` interpreter and backslash paths):
+
+```json
+{
+  "mcpServers": {
+    "sam": {
+      "command": "C:\\path\\to\\repo\\.venv\\Scripts\\python.exe",
+      "args": ["-m", "sam_mcp.server"],
+      "env": {
+        "SAM_DB": "C:\\path\\to\\repo\\db\\sam.db"
       }
     }
   }
@@ -168,9 +187,11 @@ docker compose up --build
 To reach the server from outside your LAN — e.g. published at
 `https://sam.example.com/mcp` via Nginx Proxy Manager — run it with:
 
-```
+```bash
 sam-mcp --http --behind-proxy [--allowed-hosts sam.example.com]
 ```
+
+*(In Docker this is the entry point directly. If running locally, prepend `uv run`.)*
 
 - `--behind-proxy` trusts the proxy's `X-Forwarded-*` headers (correct
   client IP / scheme).
@@ -210,6 +231,7 @@ database in sync with the latest SAM and CBIP exports. It works on any Linux
 host with Docker and curl/unzip (no Python needed on the host).
 
 The script:
+
 1. **Checks for new SAM exports** — queries the official SAM API for the latest
    version, downloads it if newer than the cached version.
 2. **Checks for updated CBIP dumps** — detects the newest French SQL edition
@@ -229,7 +251,7 @@ The script:
    - `IMAGE` — your sam-mcp image (default: `snarkbe/sam-mcp:latest`)
    - `ENABLE_CBIP` — set to 1 to auto-load CBIP updates, 0 to skip
 3. Open the **User Scripts** plugin in Unraid and create a **New Script**.
-4. Paste the contents of `refresh-sam.sh` (or reference the file).
+4. Paste the contents of `refresh-sam.sh`, or set the script path to `/mnt/user/scripts/refresh-sam.sh`.
 5. Set the schedule to **Custom** with cron syntax `30 4 * * *` (4:30 AM daily).
 
 ### Install on plain Linux
@@ -238,14 +260,15 @@ The script:
 2. Make it executable: `chmod +x /opt/sam-mcp/refresh-sam.sh`
 3. Edit the script's config section to match your setup.
 4. Add to crontab with `crontab -e`:
-   ```
+
+   ```shell
    30 4 * * *  /opt/sam-mcp/refresh-sam.sh >> /var/log/refresh-sam.log 2>&1
    ```
 
 ## Tools exposed
 
 | Tool | Purpose |
-|---|---|
+| --- | --- |
 | `search_medicine(query, limit)` | Free-text search by brand / prescription name (FR/NL/EN, diacritics-insensitive). |
 | `get_medicine(identifier)` | Full record for a CNK or AMP code: form, route, ingredients, packs. |
 | `get_ingredients(identifier)` | Active substances + strengths only. Answers "what is the dose of X?". |
@@ -260,7 +283,7 @@ The script:
 
 ## Schema (high level)
 
-```
+```text
 -- Reference
 substance(code PK, name_fr/nl/en, type)
 atc(code PK, description)
