@@ -130,6 +130,24 @@ JSON-RPC protocol — so look for them in Claude Desktop's MCP logs:
 [sam-mcp] row counts: amp=19841, ampp=100191, dmpp=25559, amp_ingredient=27398, substance=14335, atc=7231, cbip_mp=3510, cbip_mpp=8758, cbip_sam=10454
 ```
 
+In `--http` mode, `GET /status` returns the same information as JSON — useful
+for health checks or monitoring:
+
+```bash
+curl http://localhost:8000/status
+```
+
+```json
+{
+  "built": "2026-06-04 06:37:42",
+  "tables": {
+    "amp":  {"count": 19841, "description": "Actual Medicinal Product - marketed medicine"},
+    "ampp": {"count": 100191, "description": "Actual Medicinal Product Package"},
+    ...
+  }
+}
+```
+
 > ⚠️ **LAN exposure** — the server has no authentication. The DB is open
 > read-only, so the worst-case is information disclosure (medicine
 > data, all of it public anyway). Don't expose it past your trusted LAN
