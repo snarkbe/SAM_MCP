@@ -62,8 +62,11 @@ def iter_statements(text: str) -> Iterator[str]:
 
 def translate(stmt: str) -> str | None:
     s = stmt.strip()
-    # Skip PG-only session settings.
+    # Skip PG-only session settings and unsupported ALTER TABLE statements
+    # (SQLite doesn't support ADD FOREIGN KEY via ALTER TABLE).
     if re.match(r"\s*SET\s", s, re.IGNORECASE):
+        return None
+    if re.match(r"\s*ALTER\s+TABLE\s", s, re.IGNORECASE):
         return None
 
     s = _CREATE_RE.sub(lambda m: f"CREATE TABLE cbip_{m.group(1)}", s, count=1)

@@ -21,6 +21,7 @@ exportFr.sql
 *.db-journal
 *.db-wal
 *.db-shm
+xsd/
 
 # --- IDE / OS ---
 .vscode/

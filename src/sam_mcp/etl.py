@@ -418,13 +418,13 @@ def load_vmp(conn: sqlite3.Connection, path: Path, today: date) -> None:
     print(f"[VMP] {path.name}")
     n = 0
     cur = conn.cursor()
-    for _, elem in etree.iterparse(str(path), events=("end",), huge_tree=True):
-        if _local(elem.tag) != "Vtm":
-            elem.clear()
-            continue
+    tag = f"{{{NS_EXPORT}}}Vtm"
+    for _, elem in etree.iterparse(str(path), events=("end",), tag=tag, huge_tree=True):
         data = pick_current_data(elem, today)
         if data is None:
             elem.clear()
+            while elem.getprevious() is not None:
+                del elem.getparent()[0]
             continue
         name = _multilang(_child(data, "Name"))
         cur.execute(
@@ -435,6 +435,8 @@ def load_vmp(conn: sqlite3.Connection, path: Path, today: date) -> None:
         )
         n += 1
         elem.clear()
+        while elem.getprevious() is not None:
+            del elem.getparent()[0]
     conn.commit()
     print(f"[VMP] vtm={n}")
 
@@ -529,13 +531,13 @@ def load_nonmedicinal(conn: sqlite3.Connection, path: Path, today: date) -> None
     print(f"[NONMEDICINAL] {path.name}")
     n = 0
     cur = conn.cursor()
-    for _, elem in etree.iterparse(str(path), events=("end",), huge_tree=True):
-        if _local(elem.tag) != "NonMedicinalProduct":
-            elem.clear()
-            continue
+    tag = f"{{{NS_EXPORT}}}NonMedicinalProduct"
+    for _, elem in etree.iterparse(str(path), events=("end",), tag=tag, huge_tree=True):
         data = pick_current_data(elem, today)
         if data is None:
             elem.clear()
+            while elem.getprevious() is not None:
+                del elem.getparent()[0]
             continue
         name        = _multilang(_child(data, "Name"))
         producer    = _multilang(_child(data, "Producer"))
@@ -557,6 +559,8 @@ def load_nonmedicinal(conn: sqlite3.Connection, path: Path, today: date) -> None
         )
         n += 1
         elem.clear()
+        while elem.getprevious() is not None:
+            del elem.getparent()[0]
     conn.commit()
     print(f"[NONMEDICINAL] nonmedicinal={n}")
 
@@ -569,13 +573,13 @@ def load_cmp(conn: sqlite3.Connection, path: Path, today: date) -> None:
     print(f"[CMP] {path.name}")
     n = n_syn = 0
     cur = conn.cursor()
-    for _, elem in etree.iterparse(str(path), events=("end",), huge_tree=True):
-        if _local(elem.tag) != "CompoundingIngredient":
-            elem.clear()
-            continue
+    tag = f"{{{NS_EXPORT}}}CompoundingIngredient"
+    for _, elem in etree.iterparse(str(path), events=("end",), tag=tag, huge_tree=True):
         code = elem.get("code")
         if not code:
             elem.clear()
+            while elem.getprevious() is not None:
+                del elem.getparent()[0]
             continue
         data = pick_current_data(elem, today)
         cur.execute(
@@ -597,6 +601,8 @@ def load_cmp(conn: sqlite3.Connection, path: Path, today: date) -> None:
                     )
                     n_syn += 1
         elem.clear()
+        while elem.getprevious() is not None:
+            del elem.getparent()[0]
     conn.commit()
     print(f"[CMP] ingredients={n} synonyms={n_syn}")
 
