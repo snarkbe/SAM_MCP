@@ -747,6 +747,82 @@ def load_rml(conn: sqlite3.Connection, path: Path, today: date) -> None:
 # entrypoint
 # --------------------------------------------------------------------------
 
+def load_impp(conn: sqlite3.Connection, path: Path, today: date) -> None:
+    """Parse the IMPP file (ImportedMedicinalProductPackage elements).
+
+    IMPP = Imported Medicinal Products — medicines brought in from abroad for
+    compassionate use or when a standard Belgian product is unavailable.  Each
+    package has a Belgian CNK, a plain-text name (not multilang), a country
+    code, free-text strength/pack-size, one pharmaceutical form, and one or
+    more routes of administration.
+    """
+    print(f"[IMPP] {path.name}")
+    n = 0
+    cur = conn.cursor()
+    tag = f"{{{NS_EXPORT}}}ImportedMedicinalProductPackage"
+
+    for _, elem in etree.iterparse(str(path), events=("end",), tag=tag, huge_tree=True):
+        impp_id = elem.get("Id")
+        if not impp_id:
+            elem.clear()
+            while elem.getprevious() is not None:
+                del elem.getparent()[0]
+            continue
+
+        data = pick_current_data(elem, today)
+        if data is None:
+            elem.clear()
+            while elem.getprevious() is not None:
+                del elem.getparent()[0]
+            continue
+
+        cnk       = _text(data, "CNK")
+        name      = _text(data, "Name")
+        country   = _text(data, "Country")
+        strength  = _text(data, "Strength")
+        pack_size = _text(data, "PackSize")
+
+        pf_el   = _child(data, "PharmaceuticalFormCode")
+        pf_code = pf_el.get("code") if pf_el is not None else None
+        pf_name = _multilang(_child(pf_el, "Name")) if pf_el is not None else _multilang(None)
+
+        cur.execute(
+            "INSERT OR REPLACE INTO impp"
+            "(id, cnk, name, country, strength, pack_size,"
+            " pharma_form_code, pharma_form_fr, pharma_form_nl, valid_from)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (impp_id, cnk, name, country, strength, pack_size,
+             pf_code, pf_name["Fr"], pf_name["Nl"],
+             data.get("from")),
+        )
+
+        for sub_el in _children(data, "ActiveSubstance"):
+            sub_code = sub_el.get("code")
+            sub_name = _multilang(_child(sub_el, "Name"))
+            cur.execute(
+                "INSERT OR REPLACE INTO impp_substance"
+                "(impp_id, substance_code, name_fr, name_nl) VALUES (?,?,?,?)",
+                (impp_id, sub_code, sub_name["Fr"], sub_name["Nl"]),
+            )
+
+        for ro_el in _children(data, "RouteOfAdministrationCode"):
+            ro_code = ro_el.get("code")
+            ro_name = _multilang(_child(ro_el, "Name"))
+            cur.execute(
+                "INSERT OR REPLACE INTO impp_route"
+                "(impp_id, route_code, route_fr, route_nl) VALUES (?,?,?,?)",
+                (impp_id, ro_code, ro_name["Fr"], ro_name["Nl"]),
+            )
+
+        n += 1
+        elem.clear()
+        while elem.getprevious() is not None:
+            del elem.getparent()[0]
+
+    conn.commit()
+    print(f"[IMPP] impp={n}")
+
+
 def find_file(data_dir: Path, prefix: str) -> Path | None:
     matches = sorted(data_dir.glob(f"{prefix}-*.xml"))
     return matches[-1] if matches else None
@@ -800,6 +876,7 @@ def main() -> int:
         ("NONMEDICINAL", load_nonmedicinal),
         ("CMP",          load_cmp),
         ("RML",          load_rml),
+        ("IMPP",         load_impp),
     ]:
         f = find_file(args.data, prefix)
         if f:

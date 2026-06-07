@@ -457,6 +457,62 @@ def find_compounding(query: str, limit: int = 20) -> list[dict[str, Any]]:
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
+def find_imported(query: str, limit: int = 50) -> list[dict[str, Any]]:
+    """
+    Search imported medicinal products (IMPP) by product name, CNK, or active substance.
+
+    IMPP are medicines brought in from abroad for compassionate use or when a
+    standard Belgian product is unavailable.  Unlike regular AMPs they have a
+    plain-text name (not multilang), a free-text strength/pack-size description,
+    and a country-of-origin code.  They carry a Belgian CNK like any dispensed
+    product.
+
+    Returns list of {id, cnk, name, country, strength, pack_size,
+    pharma_form_fr, pharma_form_nl, valid_from,
+    substances: [{substance_code, name_fr, name_nl}],
+    routes: [{route_code, route_fr, route_nl}]}.
+    Returns empty list if the IMPP table is absent (requires DB rebuild).
+    """
+    raw = query.strip()
+    pat = f"%{raw}%"
+    with db() as conn:
+        if not _has_table(conn, "impp"):
+            return []
+        rows = conn.execute(
+            """
+            SELECT DISTINCT i.id, i.cnk, i.name, i.country,
+                   i.strength, i.pack_size,
+                   i.pharma_form_code, i.pharma_form_fr, i.pharma_form_nl,
+                   i.valid_from
+              FROM impp i
+              LEFT JOIN impp_substance s ON s.impp_id = i.id
+             WHERE i.name LIKE ?
+                OR i.cnk  = ?
+                OR s.name_fr LIKE ?
+                OR s.name_nl LIKE ?
+             ORDER BY i.name
+             LIMIT ?
+            """,
+            (pat, raw, pat, pat, max(1, min(limit, 200))),
+        ).fetchall()
+        results = []
+        for row in rows:
+            entry = _row_to_dict(row)
+            entry["substances"] = [_row_to_dict(r) for r in conn.execute(
+                "SELECT substance_code, name_fr, name_nl"
+                " FROM impp_substance WHERE impp_id = ? ORDER BY substance_code",
+                (row["id"],),
+            ).fetchall()]
+            entry["routes"] = [_row_to_dict(r) for r in conn.execute(
+                "SELECT route_code, route_fr, route_nl"
+                " FROM impp_route WHERE impp_id = ? ORDER BY route_code",
+                (row["id"],),
+            ).fetchall()]
+            results.append(entry)
+    return results
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
 def get_legal_text(text_key: str) -> dict[str, Any] | None:
     """
     Fetch a reimbursement law text by its key (e.g. '3051').
@@ -555,7 +611,8 @@ def db_info() -> dict[str, Any]:
             counts[tbl] = conn.execute(f"SELECT COUNT(*) AS n FROM {tbl}").fetchone()["n"]
         for tbl in ("amp_atc", "vtm", "reimbursement", "reimbursement_criterion",
                     "nonmedicinal", "compounding_ingredient",
-                    "legal_basis", "legal_reference", "legal_text"):
+                    "legal_basis", "legal_reference", "legal_text",
+                    "impp", "impp_substance", "impp_route"):
             if _has_table(conn, tbl):
                 counts[tbl] = conn.execute(
                     f"SELECT COUNT(*) AS n FROM {tbl}"
@@ -576,7 +633,7 @@ def _log_startup_counts() -> None:
     diagnostic output must stay off it.
     """
     core_tables  = ("amp", "ampp", "dmpp", "amp_ingredient", "substance", "atc")
-    opt_tables   = ("amp_atc",)
+    opt_tables   = ("amp_atc", "impp")
     cbip_tables  = ("cbip_mp", "cbip_mpp", "cbip_sam")
     try:
         with db() as conn:
@@ -633,6 +690,9 @@ _TABLE_DESCRIPTIONS = {
     "cbip_hyr": "CBIP therapeutic hierarchy and chapters",
     "cbip_innm": "INN/generic names as listed by CBIP",
     "cbip_sam": "CBIP-to-SAM mapping table",
+    "impp": "Imported Medicinal Product Package — medicines imported for compassionate use or shortage",
+    "impp_substance": "Active substances per imported product",
+    "impp_route": "Routes of administration per imported product",
 }
 
 

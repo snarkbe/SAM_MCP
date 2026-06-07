@@ -239,3 +239,37 @@ CREATE TABLE IF NOT EXISTS legal_text (
 
 CREATE INDEX IF NOT EXISTS idx_legalref_basis ON legal_reference(basis_key);
 CREATE INDEX IF NOT EXISTS idx_legaltext_ref  ON legal_text(basis_key, ref_key);
+
+-- IMPP -----------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS impp (
+    id               TEXT PRIMARY KEY,   -- Id attribute on ImportedMedicinalProductPackage
+    cnk              TEXT,               -- <CNK> (Belgian dispensing code)
+    name             TEXT,               -- <Name> (plain text, not multilang)
+    country          TEXT,               -- <Country> (origin country code)
+    strength         TEXT,               -- <Strength> (free text, e.g. "100 µg/dose")
+    pack_size        TEXT,               -- <PackSize>
+    pharma_form_code TEXT,
+    pharma_form_fr   TEXT,
+    pharma_form_nl   TEXT,
+    valid_from       TEXT
+);
+
+CREATE TABLE IF NOT EXISTS impp_substance (
+    impp_id        TEXT,
+    substance_code TEXT,
+    name_fr        TEXT,
+    name_nl        TEXT,
+    PRIMARY KEY (impp_id, substance_code)
+);
+
+CREATE TABLE IF NOT EXISTS impp_route (
+    impp_id    TEXT,
+    route_code TEXT,
+    route_fr   TEXT,
+    route_nl   TEXT,
+    PRIMARY KEY (impp_id, route_code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_impp_cnk      ON impp(cnk);
+CREATE INDEX IF NOT EXISTS idx_impp_sub_impp ON impp_substance(impp_id);
+CREATE INDEX IF NOT EXISTS idx_impp_sub_code ON impp_substance(substance_code);
