@@ -6,6 +6,13 @@ commentary.
 
 **SAM** = *Source Authentique des Médicaments* (Authentic Source of Medicines)
 
+> **Disclaimer** — This is an **unofficial** MCP server built on publicly available data
+> (SAM v2 XML exports from FAGG/AFMPS and the CBIP/BCFI repertoire). It is provided as
+> a research and information tool only. The information returned does **not** constitute
+> medical advice and is **not** a substitute for the opinion of a qualified healthcare
+> professional. Always consult a doctor or pharmacist before making any decision about
+> medicines.
+
 Examples it can answer:
 
 - "What is the dose of *Dafalgan 500*?"
