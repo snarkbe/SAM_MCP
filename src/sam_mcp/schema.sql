@@ -46,7 +46,8 @@ CREATE TABLE IF NOT EXISTS amp (
     prescription_name_fr TEXT,
     prescription_name_nl TEXT,
     valid_from           TEXT,
-    valid_to             TEXT
+    valid_to             TEXT,
+    vmp_code             TEXT
 );
 
 CREATE TABLE IF NOT EXISTS amp_component (
@@ -86,6 +87,7 @@ CREATE TABLE IF NOT EXISTS ampp (
     prescription_name_nl TEXT,
     delivery_modus       TEXT,
     legal_basis_fr       TEXT,
+    legal_basis_nl       TEXT,
     ex_factory_price     REAL
 );
 
@@ -103,6 +105,15 @@ CREATE INDEX IF NOT EXISTS idx_ampp_amp       ON ampp(amp_code);
 CREATE INDEX IF NOT EXISTS idx_dmpp_amp       ON dmpp(amp_code);
 CREATE INDEX IF NOT EXISTS idx_dmpp_cti       ON dmpp(cti_extended);
 CREATE INDEX IF NOT EXISTS idx_amp_comp       ON amp_component(amp_code);
+
+-- AMP ↔ ATC link (populated from VMP file during ETL) -----------------------
+CREATE TABLE IF NOT EXISTS amp_atc (
+    amp_code TEXT,
+    atc_code TEXT,
+    PRIMARY KEY (amp_code, atc_code)
+);
+CREATE INDEX IF NOT EXISTS idx_amp_atc_amp ON amp_atc(amp_code);
+CREATE INDEX IF NOT EXISTS idx_amp_atc_atc ON amp_atc(atc_code);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS amp_fts USING fts5(
     amp_code UNINDEXED,
@@ -228,3 +239,37 @@ CREATE TABLE IF NOT EXISTS legal_text (
 
 CREATE INDEX IF NOT EXISTS idx_legalref_basis ON legal_reference(basis_key);
 CREATE INDEX IF NOT EXISTS idx_legaltext_ref  ON legal_text(basis_key, ref_key);
+
+-- IMPP -----------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS impp (
+    id               TEXT PRIMARY KEY,   -- Id attribute on ImportedMedicinalProductPackage
+    cnk              TEXT,               -- <CNK> (Belgian dispensing code)
+    name             TEXT,               -- <Name> (plain text, not multilang)
+    country          TEXT,               -- <Country> (origin country code)
+    strength         TEXT,               -- <Strength> (free text, e.g. "100 µg/dose")
+    pack_size        TEXT,               -- <PackSize>
+    pharma_form_code TEXT,
+    pharma_form_fr   TEXT,
+    pharma_form_nl   TEXT,
+    valid_from       TEXT
+);
+
+CREATE TABLE IF NOT EXISTS impp_substance (
+    impp_id        TEXT,
+    substance_code TEXT,
+    name_fr        TEXT,
+    name_nl        TEXT,
+    PRIMARY KEY (impp_id, substance_code)
+);
+
+CREATE TABLE IF NOT EXISTS impp_route (
+    impp_id    TEXT,
+    route_code TEXT,
+    route_fr   TEXT,
+    route_nl   TEXT,
+    PRIMARY KEY (impp_id, route_code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_impp_cnk      ON impp(cnk);
+CREATE INDEX IF NOT EXISTS idx_impp_sub_impp ON impp_substance(impp_id);
+CREATE INDEX IF NOT EXISTS idx_impp_sub_code ON impp_substance(substance_code);

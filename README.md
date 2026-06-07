@@ -6,6 +6,13 @@ commentary.
 
 **SAM** = *Source Authentique des Médicaments* (Authentic Source of Medicines)
 
+> **Disclaimer** — This is an **unofficial** MCP server built on publicly available data
+> (SAM v2 XML exports from FAGG/AFMPS and the CBIP/BCFI repertoire). It is provided as
+> a research and information tool only. The information returned does **not** constitute
+> medical advice and is **not** a substitute for the opinion of a qualified healthcare
+> professional. Always consult a doctor or pharmacist before making any decision about
+> medicines.
+
 Examples it can answer:
 
 - "What is the dose of *Dafalgan 500*?"
@@ -15,6 +22,10 @@ Examples it can answer:
 - "Is *Eliquis 5 mg* reimbursed, and at what base price?"
 - "What are the synonyms for *calcium pantothenate* in the compounding repertoire?"
 - "Which non-medicinal products contain *magnesium*?"
+- "Which active substances have exactly one CNK on the Belgian market?"
+- "How many CNKs does metformin have?"
+- "List all proton-pump inhibitors (ATC A02BC) with their CNK count."
+- "Which PPIs are sold under only one CNK? Give me the pack details."
 
 ## Layout
 
@@ -291,6 +302,8 @@ The script:
 | `get_medicine(identifier)` | Full record for a CNK or AMP code: form, route, ingredients, packs. |
 | `get_ingredients(identifier)` | Active substances + strengths only. Answers "what is the dose of X?". |
 | `find_by_substance(substance, limit)` | Reverse lookup: every AMP containing a molecule. |
+| `aggregate_substances(name, min_cnk, max_cnk, atc, limit, offset)` | **Aggregate query** — for every active substance, count distinct CNKs and AMPs. Filter by name (partial), CNK count range, or ATC prefix. One SQL pass over the full catalogue; answers questions like "which substances have exactly one CNK?" or "list all PPIs with their CNK count". |
+| `get_substance_cnks(substance_code)` | **Drill-down** — given a substance code from `aggregate_substances`, list every CNK that contains it with pack name, medicine name, and strength. |
 | `get_atc(query)` | ATC code/description lookup (exact, prefix, or text). |
 | `get_reimbursement(cnk)` | Reimbursement data for a CNK: base/reference prices, flat-rate flag, delivery environment, criteria. |
 | `search_nonmedicinal(query, limit)` | Search non-medicinal products (dietary supplements, etc.) by name. |
@@ -298,6 +311,34 @@ The script:
 | `get_legal_text(text_key)` | Fetch a reimbursement law text by key (FR/NL content + parent context). |
 | `get_cbip_notes(cnk)` | CBIP/BCFI editorial commentary (chapter intro, positioning, notes) for a given CNK. Returns `None` if outside the CBIP repertoire. |
 | `db_info()` | Build metadata + row counts for all tables. |
+
+### Aggregate query examples
+
+```
+# All substances with exactly one CNK on the market
+aggregate_substances(min_cnk=1, max_cnk=1)
+
+# How many CNKs does metformin have?
+aggregate_substances(name="metformin")
+
+# All proton-pump inhibitors with their CNK count  (ATC A02BC)
+aggregate_substances(atc="A02BC")
+
+# PPIs sold under a single CNK, then drill into the first result
+aggregate_substances(atc="A02BC", min_cnk=1, max_cnk=1)
+get_substance_cnks("<substance_code from above>")
+
+# RAAS antihypertensives with more than 5 CNKs
+aggregate_substances(atc="C09", min_cnk=6)
+
+# Paginate through all substances (2 000 rows per page)
+aggregate_substances(limit=2000, offset=0)
+aggregate_substances(limit=2000, offset=2000)
+```
+
+> **Note:** the `atc=` filter requires a DB built after the `amp_atc` table was
+> introduced (ETL v1.6+). If the table is absent, the tool returns a warning key
+> instead of an error.
 
 ## Schema (high level)
 
@@ -315,6 +356,7 @@ amp_component(amp_code, seq) -> form + route
 amp_ingredient(amp_code, component_seq, rank) -> substance + strength
 ampp(cti_extended PK, amp_code, pack info, price)
 dmpp(cnk PK, cti_extended, amp_code)
+amp_atc(amp_code, atc_code PK)                    -- AMP → ATC link (from VMP file)
 amp_fts, substance_fts                            -- FTS5 indexes
 
 -- Reimbursement

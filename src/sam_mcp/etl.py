@@ -232,8 +232,8 @@ def process_amp(conn: sqlite3.Connection, amp_elem, today: date,
             code, name_fr, name_nl, name_en, official_name, status,
             medicine_type, black_triangle, company,
             prescription_name_fr, prescription_name_nl,
-            valid_from, valid_to)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            valid_from, valid_to, vmp_code)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             code,
             name["Fr"], name["Nl"], name["En"],
@@ -244,6 +244,7 @@ def process_amp(conn: sqlite3.Connection, amp_elem, today: date,
             company_name,
             presc["Fr"], presc["Nl"],
             amp_data.get("from"), amp_data.get("to"),
+            amp_elem.get("vmpCode"),
         ),
     )
     cur.execute(
@@ -351,14 +352,14 @@ def process_amp(conn: sqlite3.Connection, amp_elem, today: date,
                     cti_extended, amp_code, auth_nr,
                     pack_display_fr, pack_display_nl, status,
                     prescription_name_fr, prescription_name_nl,
-                    delivery_modus, legal_basis_fr, ex_factory_price)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                    delivery_modus, legal_basis_fr, legal_basis_nl, ex_factory_price)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     cti, code, _text(ampp_data, "AuthorisationNr"),
                     pack["Fr"], pack["Nl"],
                     _text(ampp_data, "Status"),
                     presc_p["Fr"], presc_p["Nl"],
-                    dm_code, legal["Fr"], ex_price,
+                    dm_code, legal["Fr"], legal["Nl"], ex_price,
                 ),
             )
             stats["ampp"] += 1
@@ -415,30 +416,68 @@ def load_amp(conn: sqlite3.Connection, path: Path, today: date) -> None:
 # --------------------------------------------------------------------------
 
 def load_vmp(conn: sqlite3.Connection, path: Path, today: date) -> None:
+    """Parse the VMP file for both Vtm (molecule definitions) and Vmp (ATC links).
+
+    Vmp elements carry the ATC classification and reference their Amp children
+    by code — this is the only place in the SAM export where the AMP→ATC link
+    is recorded.  The resulting (amp_code, atc_code) pairs are stored in the
+    amp_atc table so aggregate_substances can filter by ATC prefix.
+    """
     print(f"[VMP] {path.name}")
-    n = 0
+    n_vtm = n_amp_atc = 0
     cur = conn.cursor()
-    tag = f"{{{NS_EXPORT}}}Vtm"
-    for _, elem in etree.iterparse(str(path), events=("end",), tag=tag, huge_tree=True):
-        data = pick_current_data(elem, today)
-        if data is None:
+
+    # No tag filter: we need both Vmp and Vtm elements.
+    # Nested <Vtm code="..."/> references inside <Vmp> are skipped by
+    # checking the parent tag — they carry no Data child anyway.
+    for _, elem in etree.iterparse(str(path), events=("end",), huge_tree=True):
+        ln = _local(elem.tag)
+
+        if ln == "Vtm":
+            parent = elem.getparent()
+            if parent is not None and _local(parent.tag) == "Vmp":
+                continue  # nested reference — skip without clearing
+            data = pick_current_data(elem, today)
+            if data is not None:
+                name = _multilang(_child(data, "Name"))
+                cur.execute(
+                    "INSERT OR REPLACE INTO vtm(code, name_fr, name_nl, valid_from, valid_to)"
+                    " VALUES (?,?,?,?,?)",
+                    (elem.get("code"), name["Fr"], name["Nl"],
+                     data.get("from"), data.get("to")),
+                )
+                n_vtm += 1
             elem.clear()
             while elem.getprevious() is not None:
                 del elem.getparent()[0]
-            continue
-        name = _multilang(_child(data, "Name"))
-        cur.execute(
-            "INSERT OR REPLACE INTO vtm(code, name_fr, name_nl, valid_from, valid_to)"
-            " VALUES (?,?,?,?,?)",
-            (elem.get("code"), name["Fr"], name["Nl"],
-             data.get("from"), data.get("to")),
-        )
-        n += 1
-        elem.clear()
-        while elem.getprevious() is not None:
-            del elem.getparent()[0]
+
+        elif ln == "Vmp":
+            data = pick_current_data(elem, today)
+            atc_codes: list[str] = []
+            if data is not None:
+                atc_el = _child(data, "AtcClassifications")
+                if atc_el is not None:
+                    for atc in _children(atc_el, "AtcClassification"):
+                        c = atc.get("code")
+                        if c:
+                            atc_codes.append(c)
+            if atc_codes:
+                for amp_child in _children(elem, "Amp"):
+                    amp_code = amp_child.get("code")
+                    if amp_code:
+                        for atc_code in atc_codes:
+                            cur.execute(
+                                "INSERT OR REPLACE INTO amp_atc(amp_code, atc_code)"
+                                " VALUES (?,?)",
+                                (amp_code, atc_code),
+                            )
+                            n_amp_atc += 1
+            elem.clear()
+            while elem.getprevious() is not None:
+                del elem.getparent()[0]
+
     conn.commit()
-    print(f"[VMP] vtm={n}")
+    print(f"[VMP] vtm={n_vtm} amp_atc={n_amp_atc}")
 
 
 # --------------------------------------------------------------------------
@@ -708,6 +747,82 @@ def load_rml(conn: sqlite3.Connection, path: Path, today: date) -> None:
 # entrypoint
 # --------------------------------------------------------------------------
 
+def load_impp(conn: sqlite3.Connection, path: Path, today: date) -> None:
+    """Parse the IMPP file (ImportedMedicinalProductPackage elements).
+
+    IMPP = Imported Medicinal Products — medicines brought in from abroad for
+    compassionate use or when a standard Belgian product is unavailable.  Each
+    package has a Belgian CNK, a plain-text name (not multilang), a country
+    code, free-text strength/pack-size, one pharmaceutical form, and one or
+    more routes of administration.
+    """
+    print(f"[IMPP] {path.name}")
+    n = 0
+    cur = conn.cursor()
+    tag = f"{{{NS_EXPORT}}}ImportedMedicinalProductPackage"
+
+    for _, elem in etree.iterparse(str(path), events=("end",), tag=tag, huge_tree=True):
+        impp_id = elem.get("Id")
+        if not impp_id:
+            elem.clear()
+            while elem.getprevious() is not None:
+                del elem.getparent()[0]
+            continue
+
+        data = pick_current_data(elem, today)
+        if data is None:
+            elem.clear()
+            while elem.getprevious() is not None:
+                del elem.getparent()[0]
+            continue
+
+        cnk       = _text(data, "CNK")
+        name      = _text(data, "Name")
+        country   = _text(data, "Country")
+        strength  = _text(data, "Strength")
+        pack_size = _text(data, "PackSize")
+
+        pf_el   = _child(data, "PharmaceuticalFormCode")
+        pf_code = pf_el.get("code") if pf_el is not None else None
+        pf_name = _multilang(_child(pf_el, "Name")) if pf_el is not None else _multilang(None)
+
+        cur.execute(
+            "INSERT OR REPLACE INTO impp"
+            "(id, cnk, name, country, strength, pack_size,"
+            " pharma_form_code, pharma_form_fr, pharma_form_nl, valid_from)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (impp_id, cnk, name, country, strength, pack_size,
+             pf_code, pf_name["Fr"], pf_name["Nl"],
+             data.get("from")),
+        )
+
+        for sub_el in _children(data, "ActiveSubstance"):
+            sub_code = sub_el.get("code")
+            sub_name = _multilang(_child(sub_el, "Name"))
+            cur.execute(
+                "INSERT OR REPLACE INTO impp_substance"
+                "(impp_id, substance_code, name_fr, name_nl) VALUES (?,?,?,?)",
+                (impp_id, sub_code, sub_name["Fr"], sub_name["Nl"]),
+            )
+
+        for ro_el in _children(data, "RouteOfAdministrationCode"):
+            ro_code = ro_el.get("code")
+            ro_name = _multilang(_child(ro_el, "Name"))
+            cur.execute(
+                "INSERT OR REPLACE INTO impp_route"
+                "(impp_id, route_code, route_fr, route_nl) VALUES (?,?,?,?)",
+                (impp_id, ro_code, ro_name["Fr"], ro_name["Nl"]),
+            )
+
+        n += 1
+        elem.clear()
+        while elem.getprevious() is not None:
+            del elem.getparent()[0]
+
+    conn.commit()
+    print(f"[IMPP] impp={n}")
+
+
 def find_file(data_dir: Path, prefix: str) -> Path | None:
     matches = sorted(data_dir.glob(f"{prefix}-*.xml"))
     return matches[-1] if matches else None
@@ -761,6 +876,7 @@ def main() -> int:
         ("NONMEDICINAL", load_nonmedicinal),
         ("CMP",          load_cmp),
         ("RML",          load_rml),
+        ("IMPP",         load_impp),
     ]:
         f = find_file(args.data, prefix)
         if f:
