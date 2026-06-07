@@ -545,13 +545,26 @@ def get_cbip_notes(cnk: str) -> dict[str, Any] | None:
     Return CBIP/BCFI editorial commentary for a Belgian medicine, identified
     by CNK. Includes the therapeutic chapter (title, introduction, positioning),
     product-level notes/positioning, and the active substances as listed in
-    the repertoire. Returns None if the CNK is not in the CBIP repertoire
+    the repertoire.
+
+    The result always contains a ``coverage`` field:
+    - ``"pack_level"``: the CNK has a direct entry in the CBIP pack table;
+      all pack-specific fields (public_price, index, rema, remw, pack_name,
+      galenic_form, law, ssecr) are populated.
+    - ``"product_level"``: the CNK has no direct CBIP pack entry (e.g.
+      re-coded 77xxxxx CNKs) but a sibling pack for the same SAM AMP was
+      found; product-level editorial data is returned and pack-specific
+      fields are null.
+
+    Returns None if neither a pack-level nor a product-level match exists
     (the CBIP curates a subset of all SAM medicines).
     """
     cnk = cnk.strip()
     with db() as conn:
         if not _has_cbip(conn):
             return None
+
+        # --- primary path: direct pack-level match ---
         head = conn.execute(
             """
             SELECT m.mpcv,
@@ -576,11 +589,51 @@ def get_cbip_notes(cnk: str) -> dict[str, Any] | None:
             """,
             (cnk,),
         ).fetchone()
-        if head is None:
-            return None
-        result = _row_to_dict(head)
 
-        # Active substances as recorded by CBIP for this pack
+        if head is not None:
+            result = _row_to_dict(head)
+            result["coverage"] = "pack_level"
+            substances_cnk = cnk
+        else:
+            # --- fallback: product-level match via SAM AMP siblings ---
+            # Resolve CNK → amp_code via dmpp, then find a sibling CNK that
+            # does have a cbip_mpp entry and use its mpcv to pull product data.
+            head = conn.execute(
+                """
+                SELECT m.mpcv,
+                       m.mpnm                     AS product_name,
+                       m.note                     AS product_note,
+                       m.pos                      AS product_positioning,
+                       m.bt, m.orphan, m.narcotic, m.specrules,
+                       h.hyrcv,
+                       h.hyr                      AS chapter_code,
+                       h.ti                       AS chapter_title,
+                       h.intro                    AS chapter_intro,
+                       h.pos                      AS chapter_positioning,
+                       p.mppcv                    AS _canon_mppcv
+                  FROM dmpp d_req
+                  JOIN dmpp     d_sib ON d_sib.amp_code = d_req.amp_code
+                  JOIN cbip_mpp p     ON p.mppcv        = d_sib.cnk
+                  JOIN cbip_mp  m     ON m.mpcv         = p.mpcv
+             LEFT JOIN cbip_hyr h     ON h.hyrcv        = m.hyrcv
+                 WHERE d_req.cnk = ?
+                 LIMIT 1
+                """,
+                (cnk,),
+            ).fetchone()
+
+            if head is None:
+                return None
+
+            result = _row_to_dict(head)
+            substances_cnk = result.pop("_canon_mppcv")
+            # Pack-specific fields have no meaning at product level
+            for field in ("mppcv", "pack_name", "galenic_form", "public_price",
+                          "law", "ssecr", "index", "rema", "remw"):
+                result[field] = None
+            result["coverage"] = "product_level"
+
+        # Active substances — use canonical pack CNK (same product either way)
         substances = [_row_to_dict(r) for r in conn.execute(
             """
             SELECT s.stofcv, s.stofnm_           AS substance_name,
@@ -594,7 +647,7 @@ def get_cbip_notes(cnk: str) -> dict[str, Any] | None:
              WHERE s.mppcv = ?
              ORDER BY s.inrank
             """,
-            (cnk,),
+            (substances_cnk,),
         ).fetchall()]
         result["substances"] = substances
         return result
