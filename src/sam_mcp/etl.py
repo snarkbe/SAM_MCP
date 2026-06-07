@@ -232,8 +232,8 @@ def process_amp(conn: sqlite3.Connection, amp_elem, today: date,
             code, name_fr, name_nl, name_en, official_name, status,
             medicine_type, black_triangle, company,
             prescription_name_fr, prescription_name_nl,
-            valid_from, valid_to)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            valid_from, valid_to, vmp_code)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             code,
             name["Fr"], name["Nl"], name["En"],
@@ -244,6 +244,7 @@ def process_amp(conn: sqlite3.Connection, amp_elem, today: date,
             company_name,
             presc["Fr"], presc["Nl"],
             amp_data.get("from"), amp_data.get("to"),
+            amp_elem.get("vmpCode"),
         ),
     )
     cur.execute(
@@ -351,14 +352,14 @@ def process_amp(conn: sqlite3.Connection, amp_elem, today: date,
                     cti_extended, amp_code, auth_nr,
                     pack_display_fr, pack_display_nl, status,
                     prescription_name_fr, prescription_name_nl,
-                    delivery_modus, legal_basis_fr, ex_factory_price)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                    delivery_modus, legal_basis_fr, legal_basis_nl, ex_factory_price)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     cti, code, _text(ampp_data, "AuthorisationNr"),
                     pack["Fr"], pack["Nl"],
                     _text(ampp_data, "Status"),
                     presc_p["Fr"], presc_p["Nl"],
-                    dm_code, legal["Fr"], ex_price,
+                    dm_code, legal["Fr"], legal["Nl"], ex_price,
                 ),
             )
             stats["ampp"] += 1

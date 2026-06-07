@@ -46,7 +46,8 @@ CREATE TABLE IF NOT EXISTS amp (
     prescription_name_fr TEXT,
     prescription_name_nl TEXT,
     valid_from           TEXT,
-    valid_to             TEXT
+    valid_to             TEXT,
+    vmp_code             TEXT
 );
 
 CREATE TABLE IF NOT EXISTS amp_component (
@@ -86,6 +87,7 @@ CREATE TABLE IF NOT EXISTS ampp (
     prescription_name_nl TEXT,
     delivery_modus       TEXT,
     legal_basis_fr       TEXT,
+    legal_basis_nl       TEXT,
     ex_factory_price     REAL
 );
 

@@ -65,7 +65,7 @@ def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
 def _amp_summary(conn: sqlite3.Connection, code: str) -> dict[str, Any] | None:
     row = conn.execute(
         "SELECT code, name_fr, name_nl, name_en, official_name, status,"
-        " medicine_type, company FROM amp WHERE code = ?",
+        " medicine_type, company, vmp_code FROM amp WHERE code = ?",
         (code,),
     ).fetchone()
     return _row_to_dict(row) if row else None
@@ -151,7 +151,8 @@ def get_medicine(identifier: str) -> dict[str, Any] | None:
         packs = [_row_to_dict(r) for r in conn.execute(
             """
             SELECT d.cnk, p.cti_extended, p.pack_display_fr, p.pack_display_nl,
-                   p.status, p.delivery_modus, p.ex_factory_price
+                   p.status, p.delivery_modus, p.legal_basis_fr, p.legal_basis_nl,
+                   p.ex_factory_price
               FROM ampp p
               LEFT JOIN dmpp d ON d.cti_extended = p.cti_extended
              WHERE p.amp_code = ?
