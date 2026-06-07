@@ -314,7 +314,7 @@ The script:
 
 ### Aggregate query examples
 
-```
+```text
 # All substances with exactly one CNK on the market
 aggregate_substances(min_cnk=1, max_cnk=1)
 
@@ -356,7 +356,7 @@ amp_component(amp_code, seq) -> form + route
 amp_ingredient(amp_code, component_seq, rank) -> substance + strength
 ampp(cti_extended PK, amp_code, pack info, price)
 dmpp(cnk PK, cti_extended, amp_code)
-amp_atc(amp_code, atc_code PK)                    -- AMP → ATC link (from VMP file)
+amp_atc(amp_code, atc_code PK)                    -- AMP → ATC link (from AMP file Ampp/Atc)
 amp_fts, substance_fts                            -- FTS5 indexes
 
 -- Reimbursement

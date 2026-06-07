@@ -668,7 +668,7 @@ def _log_startup_counts() -> None:
     print(f"[sam-mcp] row counts: {summary}", file=sys.stderr, flush=True)
 
 _TABLE_DESCRIPTIONS = {
-    "amp_atc": "AMP → ATC links extracted from the VMP file (populated since v1.6)",
+    "amp_atc": "AMP → ATC links extracted from the AMP file (Ampp/Atc, populated since v1.6)",
     "amp": "Actual Medicinal Product - marketed medicine (brand + strength + company)",
     "ampp": "Actual Medicinal Product Package - specific pack of an AMP",
     "dmpp": "Dispensed Medicinal Product Package - pack at dispensing/CNK level with price/reimbursement data",

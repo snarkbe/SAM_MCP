@@ -364,6 +364,20 @@ def process_amp(conn: sqlite3.Connection, amp_elem, today: date,
             )
             stats["ampp"] += 1
 
+            # AMP -> ATC link. The ATC classification lives on each Ampp's
+            # current Data slice (<Atc code="..."/>), not in the VMP file.
+            # Roll it up to the AMP so aggregate_substances can filter by
+            # ATC prefix. INSERT OR IGNORE: packs of one AMP repeat the code.
+            atc_el = _child(ampp_data, "Atc")
+            atc_code = atc_el.get("code") if atc_el is not None else None
+            if atc_code:
+                cur.execute(
+                    "INSERT OR IGNORE INTO amp_atc(amp_code, atc_code)"
+                    " VALUES (?,?)",
+                    (code, atc_code),
+                )
+                stats["atc"] += 1
+
         for dmpp in _dmpp_iter(ampp):
             if dmpp.get("codeType") != "CNK":
                 continue
@@ -382,7 +396,7 @@ def process_amp(conn: sqlite3.Connection, amp_elem, today: date,
 
 def load_amp(conn: sqlite3.Connection, path: Path, today: date) -> None:
     print(f"[AMP] {path.name} (streaming)")
-    stats = {"amp": 0, "ampp": 0, "dmpp": 0, "ing": 0}
+    stats = {"amp": 0, "ampp": 0, "dmpp": 0, "ing": 0, "atc": 0}
     amp_tag = f"{{{NS_EXPORT}}}Amp"
 
     context = etree.iterparse(
@@ -408,7 +422,7 @@ def load_amp(conn: sqlite3.Connection, path: Path, today: date) -> None:
 
     conn.commit()
     print(f"[AMP] amp={stats['amp']} ampp={stats['ampp']} "
-          f"dmpp={stats['dmpp']} ing={stats['ing']}")
+          f"dmpp={stats['dmpp']} ing={stats['ing']} amp_atc={stats['atc']}")
 
 
 # --------------------------------------------------------------------------
@@ -416,20 +430,19 @@ def load_amp(conn: sqlite3.Connection, path: Path, today: date) -> None:
 # --------------------------------------------------------------------------
 
 def load_vmp(conn: sqlite3.Connection, path: Path, today: date) -> None:
-    """Parse the VMP file for both Vtm (molecule definitions) and Vmp (ATC links).
+    """Parse the VMP file for Vtm (molecule definitions).
 
-    Vmp elements carry the ATC classification and reference their Amp children
-    by code — this is the only place in the SAM export where the AMP→ATC link
-    is recorded.  The resulting (amp_code, atc_code) pairs are stored in the
-    amp_atc table so aggregate_substances can filter by ATC prefix.
+    Note: the AMP→ATC link is *not* in the VMP file — the current SAM v2
+    export carries the ATC classification on each Ampp's Data slice in the
+    AMP file, where load_amp populates the amp_atc table.
     """
     print(f"[VMP] {path.name}")
-    n_vtm = n_amp_atc = 0
+    n_vtm = 0
     cur = conn.cursor()
 
-    # No tag filter: we need both Vmp and Vtm elements.
-    # Nested <Vtm code="..."/> references inside <Vmp> are skipped by
-    # checking the parent tag — they carry no Data child anyway.
+    # No tag filter: we walk both top-level Vtm and Vmp elements so each is
+    # cleared to keep memory flat. Nested <Vtm code="..."/> references inside
+    # <Vmp> are skipped by checking the parent tag — they carry no Data child.
     for _, elem in etree.iterparse(str(path), events=("end",), huge_tree=True):
         ln = _local(elem.tag)
 
@@ -452,32 +465,14 @@ def load_vmp(conn: sqlite3.Connection, path: Path, today: date) -> None:
                 del elem.getparent()[0]
 
         elif ln == "Vmp":
-            data = pick_current_data(elem, today)
-            atc_codes: list[str] = []
-            if data is not None:
-                atc_el = _child(data, "AtcClassifications")
-                if atc_el is not None:
-                    for atc in _children(atc_el, "AtcClassification"):
-                        c = atc.get("code")
-                        if c:
-                            atc_codes.append(c)
-            if atc_codes:
-                for amp_child in _children(elem, "Amp"):
-                    amp_code = amp_child.get("code")
-                    if amp_code:
-                        for atc_code in atc_codes:
-                            cur.execute(
-                                "INSERT OR REPLACE INTO amp_atc(amp_code, atc_code)"
-                                " VALUES (?,?)",
-                                (amp_code, atc_code),
-                            )
-                            n_amp_atc += 1
+            # ATC links used to be parsed here, but the current export does
+            # not carry them in VMP (see load_amp). Clear to free memory.
             elem.clear()
             while elem.getprevious() is not None:
                 del elem.getparent()[0]
 
     conn.commit()
-    print(f"[VMP] vtm={n_vtm} amp_atc={n_amp_atc}")
+    print(f"[VMP] vtm={n_vtm}")
 
 
 # --------------------------------------------------------------------------
