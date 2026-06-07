@@ -104,6 +104,15 @@ CREATE INDEX IF NOT EXISTS idx_dmpp_amp       ON dmpp(amp_code);
 CREATE INDEX IF NOT EXISTS idx_dmpp_cti       ON dmpp(cti_extended);
 CREATE INDEX IF NOT EXISTS idx_amp_comp       ON amp_component(amp_code);
 
+-- AMP ↔ ATC link (populated from VMP file during ETL) -----------------------
+CREATE TABLE IF NOT EXISTS amp_atc (
+    amp_code TEXT,
+    atc_code TEXT,
+    PRIMARY KEY (amp_code, atc_code)
+);
+CREATE INDEX IF NOT EXISTS idx_amp_atc_amp ON amp_atc(amp_code);
+CREATE INDEX IF NOT EXISTS idx_amp_atc_atc ON amp_atc(atc_code);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS amp_fts USING fts5(
     amp_code UNINDEXED,
     name_fr, name_nl, name_en, official_name,

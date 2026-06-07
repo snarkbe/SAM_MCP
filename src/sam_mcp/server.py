@@ -231,6 +231,7 @@ def aggregate_substances(
     name: str = "",
     min_cnk: int = 1,
     max_cnk: int = 99999,
+    atc: str = "",
     limit: int = 200,
     offset: int = 0,
 ) -> list[dict[str, Any]]:
@@ -238,15 +239,21 @@ def aggregate_substances(
     Aggregate all active substances by CNK count (one SQL pass — no per-substance loops).
 
     This is the answer to questions like:
-      - "Which substances have exactly one CNK?"  → min_cnk=1, max_cnk=1
-      - "Which substances have more than 10 CNKs?" → min_cnk=11
-      - "How many CNKs does paracetamol have?"    → name='paracetamol'
+      - "Which substances have exactly one CNK?"      → min_cnk=1, max_cnk=1
+      - "Which substances have more than 10 CNKs?"   → min_cnk=11
+      - "How many CNKs does paracetamol have?"       → name='paracetamol'
+      - "All PPIs with their CNK count?"             → atc='A02BC'
+      - "IPP à CNK unique?"                          → atc='A02BC', min_cnk=1, max_cnk=1
 
     Parameters
     ----------
     name     : optional partial match on French or Dutch substance name (case-insensitive)
     min_cnk  : minimum number of distinct CNKs (inclusive, default 1)
     max_cnk  : maximum number of distinct CNKs (inclusive, default unbounded)
+    atc      : ATC code prefix to restrict to a therapeutic class (e.g. 'A02BC' for PPIs,
+               'C09' for RAAS drugs). Requires the DB to have been built after the
+               amp_atc table was introduced. Returns empty list with a warning key if
+               the table is absent.
     limit    : max rows returned (default 200, max 2000)
     offset   : pagination offset
 
@@ -257,49 +264,49 @@ def aggregate_substances(
     max_cnk = max(min_cnk, max_cnk)
     limit   = max(1, min(limit, 2000))
     offset  = max(0, offset)
+    atc     = atc.strip().upper()
+    name    = name.strip()
 
     with db() as conn:
-        if name.strip():
-            pat = f"%{name.strip()}%"
-            rows = conn.execute(
-                """
-                SELECT ai.substance_code,
-                       COALESCE(s.name_fr, ai.substance_name_fr) AS name_fr,
-                       COALESCE(s.name_nl, ai.substance_name_nl) AS name_nl,
-                       COUNT(DISTINCT d.cnk)      AS cnk_count,
-                       COUNT(DISTINCT ai.amp_code) AS amp_count
-                  FROM amp_ingredient ai
-                  JOIN dmpp d ON d.amp_code = ai.amp_code
-                  LEFT JOIN substance s ON s.code = ai.substance_code
-                 WHERE ai.type = 'ACTIVE_SUBSTANCE'
-                   AND (COALESCE(s.name_fr, ai.substance_name_fr) LIKE ?
-                        OR COALESCE(s.name_nl, ai.substance_name_nl) LIKE ?)
-                 GROUP BY ai.substance_code
-                HAVING cnk_count >= ? AND cnk_count <= ?
-                 ORDER BY cnk_count ASC, name_fr ASC
-                 LIMIT ? OFFSET ?
-                """,
-                (pat, pat, min_cnk, max_cnk, limit, offset),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                """
-                SELECT ai.substance_code,
-                       COALESCE(s.name_fr, ai.substance_name_fr) AS name_fr,
-                       COALESCE(s.name_nl, ai.substance_name_nl) AS name_nl,
-                       COUNT(DISTINCT d.cnk)      AS cnk_count,
-                       COUNT(DISTINCT ai.amp_code) AS amp_count
-                  FROM amp_ingredient ai
-                  JOIN dmpp d ON d.amp_code = ai.amp_code
-                  LEFT JOIN substance s ON s.code = ai.substance_code
-                 WHERE ai.type = 'ACTIVE_SUBSTANCE'
-                 GROUP BY ai.substance_code
-                HAVING cnk_count >= ? AND cnk_count <= ?
-                 ORDER BY cnk_count ASC, name_fr ASC
-                 LIMIT ? OFFSET ?
-                """,
-                (min_cnk, max_cnk, limit, offset),
-            ).fetchall()
+        if atc and not _has_table(conn, "amp_atc"):
+            return [{"warning": "amp_atc table not found — rebuild the DB to enable ATC filtering"}]
+
+        # Build WHERE / JOIN clauses dynamically based on active filters.
+        joins  = ["JOIN dmpp d ON d.amp_code = ai.amp_code",
+                  "LEFT JOIN substance s ON s.code = ai.substance_code"]
+        wheres = ["ai.type = 'ACTIVE_SUBSTANCE'"]
+        params: list = []
+
+        if atc:
+            joins.append("JOIN amp_atc aa ON aa.amp_code = ai.amp_code")
+            wheres.append("aa.atc_code LIKE ?")
+            params.append(atc + "%")
+
+        if name:
+            wheres.append(
+                "(COALESCE(s.name_fr, ai.substance_name_fr) LIKE ?"
+                " OR COALESCE(s.name_nl, ai.substance_name_nl) LIKE ?)"
+            )
+            pat = f"%{name}%"
+            params.extend([pat, pat])
+
+        params.extend([min_cnk, max_cnk, limit, offset])
+
+        sql = f"""
+            SELECT ai.substance_code,
+                   COALESCE(s.name_fr, ai.substance_name_fr) AS name_fr,
+                   COALESCE(s.name_nl, ai.substance_name_nl) AS name_nl,
+                   COUNT(DISTINCT d.cnk)      AS cnk_count,
+                   COUNT(DISTINCT ai.amp_code) AS amp_count
+              FROM amp_ingredient ai
+              {" ".join(joins)}
+             WHERE {" AND ".join(wheres)}
+             GROUP BY ai.substance_code
+            HAVING cnk_count >= ? AND cnk_count <= ?
+             ORDER BY cnk_count ASC, name_fr ASC
+             LIMIT ? OFFSET ?
+        """
+        rows = conn.execute(sql, params).fetchall()
     return [_row_to_dict(r) for r in rows]
 
 
@@ -545,7 +552,7 @@ def db_info() -> dict[str, Any]:
         for tbl in ("amp", "ampp", "dmpp", "amp_ingredient",
                     "substance", "atc", "pharma_form", "route"):
             counts[tbl] = conn.execute(f"SELECT COUNT(*) AS n FROM {tbl}").fetchone()["n"]
-        for tbl in ("vtm", "reimbursement", "reimbursement_criterion",
+        for tbl in ("amp_atc", "vtm", "reimbursement", "reimbursement_criterion",
                     "nonmedicinal", "compounding_ingredient",
                     "legal_basis", "legal_reference", "legal_text"):
             if _has_table(conn, tbl):
@@ -567,8 +574,9 @@ def _log_startup_counts() -> None:
     Writes to stderr: in stdio mode stdout is the JSON-RPC channel, so any
     diagnostic output must stay off it.
     """
-    tables = ("amp", "ampp", "dmpp", "amp_ingredient", "substance", "atc")
-    cbip_tables = ("cbip_mp", "cbip_mpp", "cbip_sam")
+    core_tables  = ("amp", "ampp", "dmpp", "amp_ingredient", "substance", "atc")
+    opt_tables   = ("amp_atc",)
+    cbip_tables  = ("cbip_mp", "cbip_mpp", "cbip_sam")
     try:
         with db() as conn:
             meta = {
@@ -579,8 +587,13 @@ def _log_startup_counts() -> None:
                 tbl: conn.execute(
                     f"SELECT COUNT(*) AS n FROM {tbl}"
                 ).fetchone()["n"]
-                for tbl in tables
+                for tbl in core_tables
             }
+            for tbl in opt_tables:
+                if _has_table(conn, tbl):
+                    counts[tbl] = conn.execute(
+                        f"SELECT COUNT(*) AS n FROM {tbl}"
+                    ).fetchone()["n"]
             if _has_cbip(conn):
                 for tbl in cbip_tables:
                     counts[tbl] = conn.execute(
@@ -597,6 +610,7 @@ def _log_startup_counts() -> None:
     print(f"[sam-mcp] row counts: {summary}", file=sys.stderr, flush=True)
 
 _TABLE_DESCRIPTIONS = {
+    "amp_atc": "AMP → ATC links extracted from the VMP file (populated since v1.6)",
     "amp": "Actual Medicinal Product - marketed medicine (brand + strength + company)",
     "ampp": "Actual Medicinal Product Package - specific pack of an AMP",
     "dmpp": "Dispensed Medicinal Product Package - pack at dispensing/CNK level with price/reimbursement data",
@@ -630,7 +644,7 @@ async def _status_handler(request) -> JSONResponse:
             for tbl in ("amp", "ampp", "dmpp", "amp_ingredient",
                         "substance", "atc", "pharma_form", "route"):
                 counts[tbl] = conn.execute(f"SELECT COUNT(*) AS n FROM {tbl}").fetchone()["n"]
-            for tbl in ("vtm", "reimbursement", "reimbursement_criterion",
+            for tbl in ("amp_atc", "vtm", "reimbursement", "reimbursement_criterion",
                         "nonmedicinal", "compounding_ingredient",
                         "legal_basis", "legal_reference", "legal_text"):
                 if _has_table(conn, tbl):
