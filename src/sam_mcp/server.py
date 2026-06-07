@@ -227,6 +227,122 @@ def find_by_substance(substance: str, limit: int = 50) -> list[dict[str, Any]]:
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
+def aggregate_substances(
+    name: str = "",
+    min_cnk: int = 1,
+    max_cnk: int = 99999,
+    limit: int = 200,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    """
+    Aggregate all active substances by CNK count (one SQL pass — no per-substance loops).
+
+    This is the answer to questions like:
+      - "Which substances have exactly one CNK?"  → min_cnk=1, max_cnk=1
+      - "Which substances have more than 10 CNKs?" → min_cnk=11
+      - "How many CNKs does paracetamol have?"    → name='paracetamol'
+
+    Parameters
+    ----------
+    name     : optional partial match on French or Dutch substance name (case-insensitive)
+    min_cnk  : minimum number of distinct CNKs (inclusive, default 1)
+    max_cnk  : maximum number of distinct CNKs (inclusive, default unbounded)
+    limit    : max rows returned (default 200, max 2000)
+    offset   : pagination offset
+
+    Returns list of {substance_code, name_fr, name_nl, cnk_count, amp_count},
+    sorted by cnk_count ASC then name_fr ASC.
+    """
+    min_cnk = max(1, min_cnk)
+    max_cnk = max(min_cnk, max_cnk)
+    limit   = max(1, min(limit, 2000))
+    offset  = max(0, offset)
+
+    with db() as conn:
+        if name.strip():
+            pat = f"%{name.strip()}%"
+            rows = conn.execute(
+                """
+                SELECT ai.substance_code,
+                       COALESCE(s.name_fr, ai.substance_name_fr) AS name_fr,
+                       COALESCE(s.name_nl, ai.substance_name_nl) AS name_nl,
+                       COUNT(DISTINCT d.cnk)      AS cnk_count,
+                       COUNT(DISTINCT ai.amp_code) AS amp_count
+                  FROM amp_ingredient ai
+                  JOIN dmpp d ON d.amp_code = ai.amp_code
+                  LEFT JOIN substance s ON s.code = ai.substance_code
+                 WHERE ai.type = 'ACTIVE_SUBSTANCE'
+                   AND (COALESCE(s.name_fr, ai.substance_name_fr) LIKE ?
+                        OR COALESCE(s.name_nl, ai.substance_name_nl) LIKE ?)
+                 GROUP BY ai.substance_code
+                HAVING cnk_count >= ? AND cnk_count <= ?
+                 ORDER BY cnk_count ASC, name_fr ASC
+                 LIMIT ? OFFSET ?
+                """,
+                (pat, pat, min_cnk, max_cnk, limit, offset),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT ai.substance_code,
+                       COALESCE(s.name_fr, ai.substance_name_fr) AS name_fr,
+                       COALESCE(s.name_nl, ai.substance_name_nl) AS name_nl,
+                       COUNT(DISTINCT d.cnk)      AS cnk_count,
+                       COUNT(DISTINCT ai.amp_code) AS amp_count
+                  FROM amp_ingredient ai
+                  JOIN dmpp d ON d.amp_code = ai.amp_code
+                  LEFT JOIN substance s ON s.code = ai.substance_code
+                 WHERE ai.type = 'ACTIVE_SUBSTANCE'
+                 GROUP BY ai.substance_code
+                HAVING cnk_count >= ? AND cnk_count <= ?
+                 ORDER BY cnk_count ASC, name_fr ASC
+                 LIMIT ? OFFSET ?
+                """,
+                (min_cnk, max_cnk, limit, offset),
+            ).fetchall()
+    return [_row_to_dict(r) for r in rows]
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
+def get_substance_cnks(substance_code: str) -> list[dict[str, Any]]:
+    """
+    List every CNK that contains a given active substance, with pack and medicine details.
+
+    Use this after aggregate_substances to drill into a specific substance.
+    The substance_code comes from the 'substance_code' field in aggregate_substances results
+    or from find_by_substance / get_ingredients.
+
+    Returns list of {cnk, amp_code, amp_name_fr, amp_name_nl, amp_status,
+    pack_display_fr, pack_display_nl, strength_quantity, strength_unit},
+    sorted by amp_name_fr then cnk.
+    """
+    substance_code = substance_code.strip()
+    with db() as conn:
+        rows = conn.execute(
+            """
+            SELECT d.cnk,
+                   a.code             AS amp_code,
+                   a.name_fr          AS amp_name_fr,
+                   a.name_nl          AS amp_name_nl,
+                   a.status           AS amp_status,
+                   p.pack_display_fr,
+                   p.pack_display_nl,
+                   ai.strength_quantity,
+                   ai.strength_unit
+              FROM amp_ingredient ai
+              JOIN amp  a ON a.code          = ai.amp_code
+              JOIN dmpp d ON d.amp_code      = a.code
+              LEFT JOIN ampp p ON p.cti_extended = d.cti_extended
+             WHERE ai.substance_code = ?
+               AND ai.type = 'ACTIVE_SUBSTANCE'
+             ORDER BY a.name_fr, d.cnk
+            """,
+            (substance_code,),
+        ).fetchall()
+    return [_row_to_dict(r) for r in rows]
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
 def get_atc(query: str, limit: int = 20) -> list[dict[str, Any]]:
     """
     Look up an ATC classification by code (exact or prefix) or description.
