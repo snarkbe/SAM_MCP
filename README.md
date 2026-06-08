@@ -21,6 +21,10 @@ A public instance is available at:
 https://sam.reichert.be/mcp
 ```
 
+**claude.ai** — add it directly via *Settings → Connectors → Add custom connector*, paste the URL above.
+
+**Claude Desktop** — claude.ai/code uses stdio only, so you need the [`mcp-remote`](https://www.npmjs.com/package/mcp-remote) bridge (requires Node.js):
+
 ```json
 {
   "mcpServers": {
