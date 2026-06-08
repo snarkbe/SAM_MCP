@@ -13,7 +13,32 @@ commentary.
 > professional. Always consult a doctor or pharmacist before making any decision about
 > medicines.
 
-Examples it can answer:
+## Live instance
+
+A public instance is available at:
+
+```
+https://sam.reichert.be/mcp
+```
+
+```json
+{
+  "mcpServers": {
+    "sam": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "https://sam.reichert.be/mcp"]
+    }
+  }
+}
+```
+
+> **No guarantees whatsoever.** This instance runs on a home server, is
+> updated on a best-effort basis, and may be down, outdated, or broken at
+> any time without notice. It is provided as a convenience for testing and
+> exploration only — do not rely on it for production use. Self-host if you
+> need stability.
+
+## Examples it can answer:
 
 - "What is the dose of *Dafalgan 500*?"
 - "Which molecule does *Symbicort* contain?"
@@ -309,7 +334,7 @@ The script:
 | `search_nonmedicinal(query, limit)` | Search non-medicinal products (dietary supplements, etc.) by name. |
 | `find_compounding(query, limit)` | Find compounding/magistral ingredients by name or synonym. |
 | `get_legal_text(text_key)` | Fetch a reimbursement law text by key (FR/NL content + parent context). |
-| `get_cbip_notes(cnk)` | CBIP/BCFI editorial commentary (chapter intro, positioning, notes) for a given CNK. Returns `None` if outside the CBIP repertoire. |
+| `get_cbip_notes(cnk)` | CBIP/BCFI editorial commentary (chapter intro, positioning, notes) for a given CNK. Returns a `coverage` field: `"pack_level"` (direct CBIP pack entry, all price/reimbursement fields populated) or `"product_level"` (re-coded CNK resolved via SAM AMP sibling — product editorial data returned, pack-specific fields null). Returns `None` if outside the CBIP repertoire. |
 | `db_info()` | Build metadata + row counts for all tables. |
 
 ### Aggregate query examples
