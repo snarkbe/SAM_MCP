@@ -23,6 +23,19 @@ https://sam.reichert.be/mcp
 
 **claude.ai / Claude Desktop** — add it via *Customize → Connectors → + → Add custom connector*, paste the URL above.
 
+**Other MCP clients** — use [`mcp-remote`](https://www.npmjs.com/package/mcp-remote) (requires Node.js):
+
+```json
+{
+  "mcpServers": {
+    "sam": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "https://sam.reichert.be/mcp"]
+    }
+  }
+}
+```
+
 > **No guarantees whatsoever.** This instance runs on a home server, is
 > updated on a best-effort basis, and may be down, outdated, or broken at
 > any time without notice. It is provided as a convenience for testing and
