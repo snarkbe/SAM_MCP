@@ -21,20 +21,9 @@ A public instance is available at:
 https://sam.reichert.be/mcp
 ```
 
-**claude.ai** — add it directly via *Settings → Connectors → Add custom connector*, paste the URL above.
+**claude.ai** — add it via *Settings → Connectors → Add custom connector*, paste the URL above.
 
-**Claude Desktop** — claude.ai/code uses stdio only, so you need the [`mcp-remote`](https://www.npmjs.com/package/mcp-remote) bridge (requires Node.js):
-
-```json
-{
-  "mcpServers": {
-    "sam": {
-      "command": "npx",
-      "args": ["-y", "mcp-remote", "https://sam.reichert.be/mcp"]
-    }
-  }
-}
-```
+**Claude Desktop** — add it via *Settings → Developer → Add MCP server*, paste the URL above.
 
 > **No guarantees whatsoever.** This instance runs on a home server, is
 > updated on a best-effort basis, and may be down, outdated, or broken at
@@ -264,23 +253,10 @@ sam-mcp --http --behind-proxy [--allowed-hosts sam.example.com]
 > instead, so a public hostname works. On the proxy side, forward to the
 > container's `:8000` with **Websockets support enabled**.
 
-Claude Desktop's config file only speaks stdio, so to use a remote URL point
-it at the [`mcp-remote`](https://www.npmjs.com/package/mcp-remote) bridge
-(requires Node.js):
-
-```json
-{
-  "mcpServers": {
-    "sam": {
-      "command": "npx",
-      "args": ["-y", "mcp-remote", "https://sam.example.com/mcp"]
-    }
-  }
-}
-```
-
-The server has no authentication, so `mcp-remote`'s OAuth discovery is a
-no-op — put auth on the reverse proxy if you need it.
+Both claude.ai and Claude Desktop support remote MCP URLs natively — paste
+`https://sam.example.com/mcp` directly in their connector settings. No bridge
+required. The server has no authentication; put auth on the reverse proxy if
+you need it.
 
 ## Automatic database updates
 
