@@ -13,7 +13,36 @@ commentary.
 > professional. Always consult a doctor or pharmacist before making any decision about
 > medicines.
 
-Examples it can answer:
+## Live instance
+
+A public instance is available at:
+
+```
+https://sam.reichert.be/mcp
+```
+
+**claude.ai / Claude Desktop** — add it via *Customize → Connectors → + → Add custom connector*, paste the URL above.
+
+**Other MCP clients** — use [`mcp-remote`](https://www.npmjs.com/package/mcp-remote) (requires Node.js):
+
+```json
+{
+  "mcpServers": {
+    "sam": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "https://sam.reichert.be/mcp"]
+    }
+  }
+}
+```
+
+> **No guarantees whatsoever.** This instance runs on a home server, is
+> updated on a best-effort basis, and may be down, outdated, or broken at
+> any time without notice. It is provided as a convenience for testing and
+> exploration only — do not rely on it for production use. Self-host if you
+> need stability.
+
+## Examples it can answer:
 
 - "What is the dose of *Dafalgan 500*?"
 - "Which molecule does *Symbicort* contain?"
@@ -235,23 +264,10 @@ sam-mcp --http --behind-proxy [--allowed-hosts sam.example.com]
 > instead, so a public hostname works. On the proxy side, forward to the
 > container's `:8000` with **Websockets support enabled**.
 
-Claude Desktop's config file only speaks stdio, so to use a remote URL point
-it at the [`mcp-remote`](https://www.npmjs.com/package/mcp-remote) bridge
-(requires Node.js):
-
-```json
-{
-  "mcpServers": {
-    "sam": {
-      "command": "npx",
-      "args": ["-y", "mcp-remote", "https://sam.example.com/mcp"]
-    }
-  }
-}
-```
-
-The server has no authentication, so `mcp-remote`'s OAuth discovery is a
-no-op — put auth on the reverse proxy if you need it.
+Both claude.ai and Claude Desktop support remote MCP URLs natively — paste
+`https://sam.example.com/mcp` directly in their connector settings. No bridge
+required. The server has no authentication; put auth on the reverse proxy if
+you need it.
 
 ## Automatic database updates
 
@@ -309,7 +325,7 @@ The script:
 | `search_nonmedicinal(query, limit)` | Search non-medicinal products (dietary supplements, etc.) by name. |
 | `find_compounding(query, limit)` | Find compounding/magistral ingredients by name or synonym. |
 | `get_legal_text(text_key)` | Fetch a reimbursement law text by key (FR/NL content + parent context). |
-| `get_cbip_notes(cnk)` | CBIP/BCFI editorial commentary (chapter intro, positioning, notes) for a given CNK. Returns `None` if outside the CBIP repertoire. |
+| `get_cbip_notes(cnk)` | CBIP/BCFI editorial commentary (chapter intro, positioning, notes) for a given CNK. Returns a `coverage` field: `"pack_level"` (direct CBIP pack entry, all price/reimbursement fields populated) or `"product_level"` (re-coded CNK resolved via SAM AMP sibling — product editorial data returned, pack-specific fields null). Returns `None` if outside the CBIP repertoire. |
 | `db_info()` | Build metadata + row counts for all tables. |
 
 ### Aggregate query examples
