@@ -21,9 +21,7 @@ A public instance is available at:
 https://sam.reichert.be/mcp
 ```
 
-**claude.ai** — add it via *Settings → Connectors → Add custom connector*, paste the URL above.
-
-**Claude Desktop** — add it via *Settings → Developer → Add MCP server*, paste the URL above.
+**claude.ai / Claude Desktop** — add it via *Customize → Connectors → + → Add custom connector*, paste the URL above.
 
 > **No guarantees whatsoever.** This instance runs on a home server, is
 > updated on a best-effort basis, and may be down, outdated, or broken at
