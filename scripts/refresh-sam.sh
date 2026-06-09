@@ -89,7 +89,7 @@ if [ "$rebuild" = 0 ]; then
 fi
 
 log "Building database in a temporary container (10-20 min)..."
-etl_args=(--data /xml --db /data/sam.new.db)
+etl_args=(--data /xml --db /data/sam.new.db --stats-out /data/.refresh-stats.tmp)
 # The rebuild wipes the DB, so always reload CBIP if we have the dump.
 [ -f "$XML/exportFr.sql" ] && etl_args+=(--with-cbip --cbip-sql /xml/exportFr.sql)
 
@@ -109,7 +109,7 @@ if [ "$rc" = 2 ]; then
     log "WARN: CBIP reported row-level errors (exit 2) — DB built fine, continuing."
 elif [ "$rc" != 0 ]; then
     log "ERROR: ETL failed (exit $rc) — keeping the old DB."
-    rm -f "$DBDIR/sam.new.db"
+    rm -f "$DBDIR/sam.new.db" "$DBDIR/.refresh-stats.tmp"
     exit 1
 fi
 
@@ -128,7 +128,32 @@ rm -f "$DBDIR/sam.new.db-wal" "$DBDIR/sam.new.db-shm"
 log "Starting $CONTAINER..."
 docker start "$CONTAINER" >/dev/null || log "WARN: start failed — start it manually."
 
-# ---- 4. prune old XML (keep newest 2 of each prefix) -----------------------
+# ---- 4. record per-table stats for trend tracking --------------------------
+# The ETL wrote `table,count` lines into the new DB's folder. Merge them with
+# the refresh timestamp and the SAM/CBIP versions into a long-format CSV (one
+# row per table per refresh) so the data's evolution can be charted/pivoted.
+STATS_CSV="$APPDATA/refresh-stats.csv"
+STATS_TMP="$DBDIR/.refresh-stats.tmp"
+if [ -f "$STATS_TMP" ]; then
+    now=$(date -Is)
+    [ -f "$STATS_CSV" ] || echo "timestamp,sam_version,cbip_version,table,row_count" > "$STATS_CSV"
+    while IFS=, read -r tname tcount; do
+        [ -n "$tname" ] && echo "$now,$ver,${code:-},$tname,$tcount" >> "$STATS_CSV"
+    done < "$STATS_TMP"
+    rm -f "$STATS_TMP"
+
+    # Retention: keep the header + rows from the last 30 days. Compare on the
+    # date prefix (YYYY-MM-DD) so DST offset shifts in the ISO stamp don't break
+    # the lexicographic comparison.
+    cutoff=$(date -d '30 days ago' +%F)
+    awk -F, -v c="$cutoff" 'NR==1 || substr($1,1,10) >= c' "$STATS_CSV" > "$STATS_CSV.tmp" \
+        && mv -f "$STATS_CSV.tmp" "$STATS_CSV"
+    log "Recorded refresh stats to $STATS_CSV (30-day retention applied)."
+else
+    log "WARN: ETL produced no stats file — skipping stats CSV."
+fi
+
+# ---- 5. prune old XML (keep newest 2 of each prefix) -----------------------
 for p in $(ls "$XML"/*.xml 2>/dev/null | sed -E 's#.*/([A-Z]+)-.*#\1#' | sort -u); do
     ls -t "$XML/$p"-*.xml 2>/dev/null | tail -n +3 | xargs -r rm -f
 done

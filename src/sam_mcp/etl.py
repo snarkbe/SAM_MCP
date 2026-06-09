@@ -823,6 +823,33 @@ def find_file(data_dir: Path, prefix: str) -> Path | None:
     return matches[-1] if matches else None
 
 
+def write_stats(db_path: Path, out_path: Path) -> None:
+    """Write per-table row counts of the built DB as `table,count` CSV lines.
+
+    Enumerates every real table from sqlite_master, skipping SQLite internals
+    and FTS5 shadow tables (their counts are not meaningful). The refresh
+    script merges these counts with the SAM/CBIP versions and a timestamp into
+    its tracking CSV, so we deliberately emit only table/count here.
+    """
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        tables = [
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '%_fts%' "
+                "ORDER BY name"
+            )
+        ]
+        lines = [
+            f"{t},{conn.execute(f'SELECT COUNT(*) FROM \"{t}\"').fetchone()[0]}"
+            for t in tables
+        ]
+    finally:
+        conn.close()
+    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"[stats] {len(lines)} table counts -> {out_path}")
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="Build SAM SQLite DB from XML exports")
     p.add_argument("--data", type=Path, default=Path("xml"),
@@ -837,6 +864,9 @@ def main() -> int:
                    help="Also load the CBIP/BCFI dump after the SAM build")
     p.add_argument("--cbip-sql", type=Path, default=Path("exportFr.sql"),
                    help="Path to the CBIP pg_dump .sql (used with --with-cbip)")
+    p.add_argument("--stats-out", type=Path, default=None,
+                   help="Write per-table row counts (CSV: table,count) here "
+                        "after the build, for refresh trend tracking")
     args = p.parse_args()
 
     today = date.fromisoformat(args.today) if args.today else date.today()
@@ -887,12 +917,17 @@ def main() -> int:
     conn.close()
     print(f"[done] {args.db}")
 
+    rc = 0
     if args.with_cbip:
         from . import etl_cbip
         rc = etl_cbip.run(args.cbip_sql, args.db)
-        if rc != 0:
-            return rc
-    return 0
+
+    # Stats are written even on a CBIP row-level error (rc == 2): the DB is
+    # built and self-consistent. The caller decides whether to keep the build.
+    if args.stats_out:
+        write_stats(args.db, args.stats_out)
+
+    return rc
 
 
 if __name__ == "__main__":
