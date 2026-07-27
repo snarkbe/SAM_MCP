@@ -340,7 +340,7 @@ The script:
 | `find_compounding(query, limit)` | Find compounding/magistral ingredients by name or synonym. |
 | `get_legal_text(text_key)` | Fetch a reimbursement law text by key (FR/NL content + parent context). |
 | `get_cbip_notes(cnk)` | CBIP/BCFI editorial commentary (chapter intro, positioning, notes) for a given CNK. Returns a `coverage` field: `"pack_level"` (direct CBIP pack entry, all price/reimbursement fields populated) or `"product_level"` (re-coded CNK resolved via SAM AMP sibling — product editorial data returned, pack-specific fields null). Returns `None` if outside the CBIP repertoire. |
-| `db_info()` | Build metadata + row counts for all tables. |
+| `get_database_stats()` | Build metadata + row counts and descriptions for every table — what's searchable and how much of it there is. |
 
 ### Aggregate query examples
 

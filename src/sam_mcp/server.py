@@ -539,6 +539,30 @@ def _has_cbip(conn: sqlite3.Connection) -> bool:
     return _has_table(conn, "cbip_mpp")
 
 
+_CORE_TABLES = ("amp", "ampp", "dmpp", "amp_ingredient", "substance", "atc",
+                "pharma_form", "route")
+_OPTIONAL_TABLES = ("amp_atc", "vtm", "reimbursement", "reimbursement_criterion",
+                    "nonmedicinal", "compounding_ingredient",
+                    "legal_basis", "legal_reference", "legal_text",
+                    "impp", "impp_substance", "impp_route")
+_CBIP_TABLES = ("cbip_mp", "cbip_mpp", "cbip_hyr", "cbip_innm", "cbip_sam")
+
+
+def _collect_counts(conn: sqlite3.Connection) -> dict[str, int]:
+    """Row counts for every table this DB build has, core + optional + CBIP."""
+    counts = {
+        tbl: conn.execute(f"SELECT COUNT(*) AS n FROM {tbl}").fetchone()["n"]
+        for tbl in _CORE_TABLES
+    }
+    for tbl in _OPTIONAL_TABLES:
+        if _has_table(conn, tbl):
+            counts[tbl] = conn.execute(f"SELECT COUNT(*) AS n FROM {tbl}").fetchone()["n"]
+    if _has_cbip(conn):
+        for tbl in _CBIP_TABLES:
+            counts[tbl] = conn.execute(f"SELECT COUNT(*) AS n FROM {tbl}").fetchone()["n"]
+    return counts
+
+
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
 def get_cbip_notes(cnk: str) -> dict[str, Any] | None:
     """
@@ -654,29 +678,25 @@ def get_cbip_notes(cnk: str) -> dict[str, Any] | None:
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-def db_info() -> dict[str, Any]:
-    """Return SAM database build info and row counts (for debugging)."""
+def get_database_stats() -> dict[str, Any]:
+    """
+    Report what's in the SAM database and how much of it there is.
+
+    Call this first when you don't know whether something is searchable, or
+    to gauge how big a result set a search might return — each table has a
+    row count plus a short description of what it holds (e.g. how many
+    medicines, active substances, or CBIP-annotated packs are available).
+    Optional tables (ATC links, IMPP imports, CBIP notes) only appear if this
+    DB build includes them.
+    """
     with db() as conn:
         meta = {r["key"]: r["value"] for r in conn.execute("SELECT key, value FROM meta")}
-        counts = {}
-        for tbl in ("amp", "ampp", "dmpp", "amp_ingredient",
-                    "substance", "atc", "pharma_form", "route"):
-            counts[tbl] = conn.execute(f"SELECT COUNT(*) AS n FROM {tbl}").fetchone()["n"]
-        for tbl in ("amp_atc", "vtm", "reimbursement", "reimbursement_criterion",
-                    "nonmedicinal", "compounding_ingredient",
-                    "legal_basis", "legal_reference", "legal_text",
-                    "impp", "impp_substance", "impp_route"):
-            if _has_table(conn, tbl):
-                counts[tbl] = conn.execute(
-                    f"SELECT COUNT(*) AS n FROM {tbl}"
-                ).fetchone()["n"]
-        if _has_cbip(conn):
-            for tbl in ("cbip_mp", "cbip_mpp", "cbip_hyr",
-                        "cbip_innm", "cbip_sam"):
-                counts[tbl] = conn.execute(
-                    f"SELECT COUNT(*) AS n FROM {tbl}"
-                ).fetchone()["n"]
-    return {"db_path": str(DB_PATH), "meta": meta, "counts": counts}
+        counts = _collect_counts(conn)
+    tables = {
+        tbl: {"count": n, "description": _TABLE_DESCRIPTIONS.get(tbl, "")}
+        for tbl, n in counts.items()
+    }
+    return {"db_path": str(DB_PATH), "meta": meta, "tables": tables}
 
 
 def _log_startup_counts() -> None:
@@ -757,22 +777,7 @@ async def _status_handler(request) -> JSONResponse:
     try:
         with db() as conn:
             meta = {r["key"]: r["value"] for r in conn.execute("SELECT key, value FROM meta")}
-            counts: dict[str, int] = {}
-            for tbl in ("amp", "ampp", "dmpp", "amp_ingredient",
-                        "substance", "atc", "pharma_form", "route"):
-                counts[tbl] = conn.execute(f"SELECT COUNT(*) AS n FROM {tbl}").fetchone()["n"]
-            for tbl in ("amp_atc", "vtm", "reimbursement", "reimbursement_criterion",
-                        "nonmedicinal", "compounding_ingredient",
-                        "legal_basis", "legal_reference", "legal_text"):
-                if _has_table(conn, tbl):
-                    counts[tbl] = conn.execute(
-                        f"SELECT COUNT(*) AS n FROM {tbl}"
-                    ).fetchone()["n"]
-            if _has_cbip(conn):
-                for tbl in ("cbip_mp", "cbip_mpp", "cbip_hyr", "cbip_innm", "cbip_sam"):
-                    counts[tbl] = conn.execute(
-                        f"SELECT COUNT(*) AS n FROM {tbl}"
-                    ).fetchone()["n"]
+            counts = _collect_counts(conn)
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
     tables = {
