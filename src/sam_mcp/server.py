@@ -515,16 +515,58 @@ def find_imported(query: str, limit: int = 50) -> list[dict[str, Any]]:
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
 def get_legal_text(text_key: str) -> dict[str, Any] | None:
     """
-    Fetch a reimbursement law text by its key (e.g. '3051').
-    Returns content in French and Dutch, text type, sequence number and the
-    parent legal reference and basis for context.
+    Fetch reimbursement law text, by either of two key formats:
+
+    - a legal_text.text_key primary key (e.g. '40869') - returns that single
+      text node: content in French and Dutch, text type, sequence number and
+      the parent legal reference/basis for context.
+    - a legal_reference path, i.e. the exact string found in
+      get_reimbursement's `legal_reference` field (e.g. 'RD20180201-IV-2630000',
+      shaped "{legal_basis.key}-{chapter}-{paragraph}") - resolves the
+      chapter/paragraph and returns every legal_text point under it, in
+      sequence, as `texts`.
+      Note: some chapters carry no conditional text at all - e.g. Chapter I
+      ('...-I-...') is the base reimbursement category with no special
+      conditions, so `texts` is legitimately an empty list for it. That is
+      not a lookup failure.
+
+    Returns None only when the key matches neither a legal_text.text_key nor
+    a resolvable legal_basis in a 3-part path.
     """
+    key = text_key.strip()
+    parts = key.split("-")
     with db() as conn:
+        if len(parts) == 3:
+            basis_key, chapter, paragraph = parts
+            basis_row = conn.execute(
+                "SELECT key FROM legal_basis WHERE key = ?", (basis_key,)
+            ).fetchone()
+            if basis_row is not None:
+                ref_row = conn.execute(
+                    "SELECT title_fr, title_nl, type FROM legal_reference"
+                    " WHERE basis_key = ? AND ref_key = ? AND parent_ref_key = ?",
+                    (basis_key, paragraph, chapter),
+                ).fetchone()
+                texts = [_row_to_dict(r) for r in conn.execute(
+                    "SELECT basis_key, ref_key, text_key, parent_text_key,"
+                    " content_fr, content_nl, type, sequence_nr"
+                    " FROM legal_text WHERE basis_key = ? AND ref_key = ?"
+                    " ORDER BY sequence_nr",
+                    (basis_key, paragraph),
+                ).fetchall()]
+                return {
+                    "basis_key": basis_key,
+                    "chapter": chapter,
+                    "paragraph": paragraph,
+                    "reference_title_fr": ref_row["title_fr"] if ref_row else None,
+                    "reference_title_nl": ref_row["title_nl"] if ref_row else None,
+                    "texts": texts,
+                }
         row = conn.execute(
             "SELECT basis_key, ref_key, text_key, parent_text_key,"
             " content_fr, content_nl, type, sequence_nr"
             " FROM legal_text WHERE text_key = ?",
-            (text_key.strip(),),
+            (key,),
         ).fetchone()
     return _row_to_dict(row) if row else None
 
