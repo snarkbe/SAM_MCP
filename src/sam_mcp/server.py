@@ -716,7 +716,10 @@ def _log_startup_counts() -> None:
         return
 
     built = meta.get("built_at") or "unknown"
-    print(f"[sam-mcp] DB {DB_PATH} (built: {built})", file=sys.stderr, flush=True)
+    cbip = meta.get("cbip_export_date") or meta.get("cbip_source")
+    suffix = f", CBIP edition: {cbip}" if cbip else ""
+    print(f"[sam-mcp] DB {DB_PATH} (built: {built}{suffix})",
+          file=sys.stderr, flush=True)
     summary = ", ".join(f"{tbl}={n}" for tbl, n in counts.items())
     print(f"[sam-mcp] row counts: {summary}", file=sys.stderr, flush=True)
 

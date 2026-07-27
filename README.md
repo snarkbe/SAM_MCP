@@ -166,7 +166,7 @@ These diagnostics go to **stderr** — in stdio mode stdout carries the
 JSON-RPC protocol — so look for them in Claude Desktop's MCP logs:
 
 ```text
-[sam-mcp] DB db\sam.db (built: 2026-06-04 06:37:42)
+[sam-mcp] DB db\sam.db (built: 2026-06-04 06:37:42, CBIP edition: 2026-07)
 [sam-mcp] row counts: amp=19841, ampp=100191, dmpp=25559, amp_ingredient=27398, substance=14335, atc=7231, cbip_mp=3510, cbip_mpp=8758, cbip_sam=10454
 ```
 
@@ -179,7 +179,13 @@ curl http://localhost:8000/status
 
 ```json
 {
-  "built": "2026-06-04 06:37:42",
+  "meta": {
+    "built_at": "2026-06-04 06:37:42",
+    "reference_date": "2026-06-04",
+    "cbip_loaded_at": "2026-06-04 06:41:10",
+    "cbip_edition": "2607",
+    "cbip_export_date": "2026-07"
+  },
   "tables": {
     "amp":  {"count": 19841, "description": "Actual Medicinal Product - marketed medicine"},
     "ampp": {"count": 100191, "description": "Actual Medicinal Product Package"},
@@ -187,6 +193,14 @@ curl http://localhost:8000/status
   }
 }
 ```
+
+`cbip_export_date` is the month of the CBIP edition (`YYYY-MM`), read from the
+dump itself — its PostgreSQL schema name (`SET SEARCH_PATH TO r2607_sql_fr`)
+encodes the edition as `r` + YYMM, and `cbip_edition` keeps that raw code
+(`2607`), which is also what the download is named (`sql4Emd_Fr_2607A.zip`).
+The unzipped file is always `exportFr.sql`, so the file name says nothing
+about the data's age. `cbip_loaded_at` is when the dump was loaded, which
+tracks the nightly refresh, not the export.
 
 > ⚠️ **LAN exposure** — the server has no authentication. The DB is open
 > read-only, so the worst-case is information disclosure (medicine
