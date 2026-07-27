@@ -31,6 +31,24 @@ _BOOL_RE    = re.compile(r"\bbool\b", re.IGNORECASE)
 _CREATE_RE  = re.compile(r"\bCREATE TABLE\s+([A-Za-z_]\w*)\b", re.IGNORECASE)
 _INSERT_RE  = re.compile(r"\bINSERT INTO\s+([A-Za-z_]\w*)\b", re.IGNORECASE)
 
+# The dump opens with `SET SEARCH_PATH TO r2605_sql_fr;` — the PG schema name
+# carries the edition: r + YYMM (2605 = May 2026), the same code that appears
+# in the download name (`sql4Emd_Fr_2605A.zip`). The unzipped file is always
+# called `exportFr.sql`, so this marker is the only in-file trace of *when*
+# the repertoire was exported.
+_EDITION_RE = re.compile(r"SET\s+SEARCH_PATH\s+TO\s+r(\d{2})(\d{2})\w*", re.IGNORECASE)
+
+
+def detect_edition(text: str) -> tuple[str, str] | None:
+    """Return ``(edition_code, "YYYY-MM")`` from the dump's SEARCH_PATH, or None."""
+    m = _EDITION_RE.search(text[:4096])
+    if not m:
+        return None
+    yy, mm = m.group(1), m.group(2)
+    if not ("01" <= mm <= "12"):
+        return None
+    return f"{yy}{mm}", f"20{yy}-{mm}"
+
 
 def iter_statements(text: str) -> Iterator[str]:
     """Yield SQL statements from a dump, respecting single-quoted strings."""
@@ -167,8 +185,24 @@ def run(sql_path: Path, db_path: Path, encoding: str = "utf-8") -> int:
     create_indexes_and_fts(conn)
     conn.execute("INSERT OR REPLACE INTO meta(key,value) "
                  "VALUES ('cbip_loaded_at', datetime('now'))")
-    conn.execute("INSERT OR REPLACE INTO meta(key,value) "
-                 "VALUES ('cbip_source', ?)", (sql_path.name,))
+
+    # Record the edition, not the file name: the dump is always unzipped as
+    # `exportFr.sql`, so the name says nothing about how old the data is.
+    conn.execute("DELETE FROM meta WHERE key IN "
+                 "('cbip_source', 'cbip_edition', 'cbip_export_date')")
+    edition = detect_edition(text)
+    if edition:
+        code, month = edition
+        conn.execute("INSERT INTO meta(key,value) VALUES ('cbip_edition', ?)", (code,))
+        conn.execute("INSERT INTO meta(key,value) VALUES ('cbip_export_date', ?)", (month,))
+        print(f"[CBIP] edition {code} ({month})")
+    else:
+        # No SEARCH_PATH marker (format change?) — keep the file name so the
+        # status output still shows *something* about the source.
+        conn.execute("INSERT INTO meta(key,value) VALUES ('cbip_source', ?)",
+                     (sql_path.name,))
+        print(f"[CBIP] WARNING: no edition marker found in {sql_path.name}",
+              file=sys.stderr)
     conn.commit()
     conn.close()
     print(f"[done] CBIP loaded into {db_path}")
