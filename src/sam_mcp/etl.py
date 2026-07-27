@@ -162,15 +162,26 @@ def load_ref(conn: sqlite3.Connection, path: Path, today: date) -> None:
             elem.clear()
 
     conn.commit()
+    print(f"[REF] atc={n_atc} substance={n_sub} form={n_form} route={n_route}")
 
-    # Populate substance FTS
+
+def sync_substance_fts(conn: sqlite3.Connection) -> None:
+    """
+    Rebuild substance_fts from the substance table.
+
+    Must run after load_amp: some substances have no current <Data> slice
+    in the REF file (pick_current_data finds nothing), so load_ref inserts
+    them with NULL names; process_amp's backfill then fills those names in
+    from the inline <RealActualIngredient> data. Populating the FTS index
+    before that backfill would permanently miss those substances.
+    """
+    cur = conn.cursor()
     cur.execute("DELETE FROM substance_fts")
     cur.execute(
         "INSERT INTO substance_fts(substance_code, name_fr, name_nl, name_en) "
         "SELECT code, COALESCE(name_fr,''), COALESCE(name_nl,''), COALESCE(name_en,'') FROM substance"
     )
     conn.commit()
-    print(f"[REF] atc={n_atc} substance={n_sub} form={n_form} route={n_route}")
 
 
 # --------------------------------------------------------------------------
@@ -317,11 +328,19 @@ def process_amp(conn: sqlite3.Connection, amp_elem, today: date,
             )
             stats["ing"] += 1
 
-            # Backfill substance table from inline data if absent
+            # Backfill substance table from inline data. Use UPSERT rather
+            # than INSERT OR IGNORE: REF may have already created a stub row
+            # with NULL names (substance had no current <Data> slice), and a
+            # plain IGNORE would leave that stub un-searchable forever.
             if sub_code:
                 cur.execute(
-                    "INSERT OR IGNORE INTO substance(code, name_fr, name_nl, name_en, type)"
-                    " VALUES (?,?,?,?,?)",
+                    "INSERT INTO substance(code, name_fr, name_nl, name_en, type)"
+                    " VALUES (?,?,?,?,?)"
+                    " ON CONFLICT(code) DO UPDATE SET"
+                    " name_fr = COALESCE(NULLIF(substance.name_fr, ''), excluded.name_fr),"
+                    " name_nl = COALESCE(NULLIF(substance.name_nl, ''), excluded.name_nl),"
+                    " name_en = COALESCE(NULLIF(substance.name_en, ''), excluded.name_en),"
+                    " type = COALESCE(NULLIF(substance.type, ''), excluded.type)",
                     (sub_code, sub_name["Fr"], sub_name["Nl"], sub_name["En"],
                      _text(ing_data, "Type")),
                 )
@@ -894,6 +913,8 @@ def main() -> int:
             load_amp(conn, amp, today)
         else:
             print("! no AMP file found", file=sys.stderr)
+
+    sync_substance_fts(conn)
 
     for prefix, loader in [
         ("VMP",          load_vmp),
