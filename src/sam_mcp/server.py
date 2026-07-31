@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import sys
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,47 @@ from starlette.responses import JSONResponse
 DB_PATH = Path(os.environ.get("SAM_DB", "db/sam.db"))
 
 mcp = FastMCP("sam")
+
+
+def _summarize_result(result: Any) -> str:
+    # mcp.call_tool(..., convert_result=True) normalizes tool return values into
+    # (content_blocks, structured_content) -- unwrap that to report item counts.
+    if isinstance(result, tuple) and len(result) == 2:
+        _content, structured = result
+        if isinstance(structured, dict) and isinstance(structured.get("result"), list):
+            return f"{len(structured['result'])} item(s)"
+        return "1 object"
+    if isinstance(result, list):
+        return f"{len(result)} item(s)"
+    if isinstance(result, dict):
+        return "1 object"
+    return type(result).__name__
+
+
+async def _logged_call_tool(name: str, arguments: dict[str, Any]):
+    """Log every tool call to stderr, then delegate to FastMCP's own dispatcher.
+
+    FastMCP's built-in handler only logs "Processing request of type
+    CallToolRequest" (no tool name/args), so this re-registers the low-level
+    CallToolRequest handler -- the one choke point every call passes through
+    for both stdio and --http transports. If a future mcp SDK upgrade changes
+    FastMCP._setup_handlers(), re-check this still overrides the same hook.
+    """
+    start = time.perf_counter()
+    try:
+        result = await mcp.call_tool(name, arguments)
+    except Exception as exc:
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        print(f"[sam-mcp] tool={name} args={arguments} FAILED in {elapsed_ms:.0f}ms: {exc}",
+              file=sys.stderr, flush=True)
+        raise
+    elapsed_ms = (time.perf_counter() - start) * 1000
+    print(f"[sam-mcp] tool={name} args={arguments} -> {_summarize_result(result)} in {elapsed_ms:.0f}ms",
+          file=sys.stderr, flush=True)
+    return result
+
+
+mcp._mcp_server.call_tool(validate_input=False)(_logged_call_tool)
 
 
 @contextmanager
