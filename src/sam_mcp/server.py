@@ -14,22 +14,103 @@ MCP client at http://<host-lan-ip>:8000/mcp). Database stays read-only.
 
 from __future__ import annotations
 
+import hmac
+import html
+import logging
 import os
 import sqlite3
 import sys
+import threading
 import time
+from collections import deque
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
-from starlette.responses import JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 DB_PATH = Path(os.environ.get("SAM_DB", "db/sam.db"))
 
 mcp = FastMCP("sam")
+
+# --- log capture -----------------------------------------------------------
+# Nothing in this process keeps log history: every diagnostic is a bare print()
+# straight to stderr, which is what `docker logs` shows. To serve the same
+# stream over HTTP (/log) we tee stdout/stderr into an in-memory ring buffer.
+
+try:
+    _LOG_CAPACITY = max(1, int(os.environ.get("SAM_LOG_LINES", "2000")))
+except ValueError:
+    _LOG_CAPACITY = 2000
+_LOG_BUFFER: deque[tuple[float, str]] = deque(maxlen=_LOG_CAPACITY)  # (timestamp, line)
+_LOG_LOCK = threading.Lock()
+
+
+class _TeeStream:
+    """Write-through wrapper that also records completed lines in _LOG_BUFFER."""
+
+    def __init__(self, wrapped) -> None:
+        self._wrapped = wrapped
+        self._partial = ""
+
+    def write(self, s: str) -> int:
+        # Write through first — capture must never break real output.
+        n = self._wrapped.write(s)
+        try:
+            self._capture(s)
+        except Exception:
+            pass
+        return n
+
+    def _capture(self, s: str) -> None:
+        # print() emits the text and the trailing newline as separate writes,
+        # so hold back the tail until a newline actually arrives.
+        self._partial += s
+        if "\n" not in self._partial:
+            return
+        *lines, self._partial = self._partial.split("\n")
+        now = time.time()
+        with _LOG_LOCK:
+            for line in lines:
+                # Skip uvicorn's own access lines for /log, otherwise the page's
+                # auto-refresh would fill the buffer with records of itself.
+                # Access format: 1.2.3.4:5678 - "GET /log HTTP/1.1" 200 OK
+                if '"GET /log' in line:
+                    continue
+                _LOG_BUFFER.append((now, line))
+
+    def flush(self) -> None:
+        self._wrapped.flush()
+
+    def __getattr__(self, item):
+        # encoding, fileno, isatty, writable, ... — uvicorn and
+        # logging.StreamHandler expect a real file-like object.
+        return getattr(self._wrapped, item)
+
+
+def _install_log_capture() -> None:
+    """Tee stdout/stderr into the ring buffer served by /log. Idempotent."""
+    if not isinstance(sys.stdout, _TeeStream):
+        sys.stdout = _TeeStream(sys.stdout)
+    if not isinstance(sys.stderr, _TeeStream):
+        sys.stderr = _TeeStream(sys.stderr)
+
+    # FastMCP calls logging.basicConfig() from its constructor, which runs at
+    # import time (`mcp = FastMCP("sam")` above) — long before this. That root
+    # handler captured the pre-tee stderr, so without re-pointing it the mcp
+    # SDK's own lines reach `docker logs` but never the buffer.
+    for handler in logging.root.handlers:
+        stream = getattr(handler, "stream", None)
+        if not hasattr(handler, "setStream"):
+            continue
+        if stream is sys.stderr._wrapped:
+            handler.setStream(sys.stderr)
+        elif stream is sys.stdout._wrapped:
+            handler.setStream(sys.stdout)
 
 
 def _summarize_result(result: Any) -> str:
@@ -988,6 +1069,104 @@ async def _status_handler(request) -> JSONResponse:
     return JSONResponse({"meta": meta, "tables": tables})
 
 
+_LOG_PAGE = """<!doctype html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="refresh" content="{refresh}">
+<title>sam-mcp log</title>
+<style>
+  :root {{ color-scheme: dark; }}
+  body {{ margin: 0; background: #11131a; color: #d5d8e0;
+         font: 13px/1.45 ui-monospace, "SFMono-Regular", Consolas, monospace; }}
+  header {{ position: sticky; top: 0; background: #191c26; border-bottom: 1px solid #2b3040;
+            padding: 8px 14px; color: #8b93a7; }}
+  header b {{ color: #d5d8e0; font-weight: 600; }}
+  header a {{ color: #6ea8fe; text-decoration: none; }}
+  main {{ padding: 10px 14px 40px; }}
+  div.l {{ white-space: pre-wrap; word-break: break-word; }}
+  span.t {{ color: #5a6178; }}
+  div.err {{ color: #ff8080; }}
+  div.warn {{ color: #ffc46b; }}
+  p.empty {{ color: #8b93a7; }}
+</style></head>
+<body>
+<header><b>sam-mcp</b> — {count} line(s), buffer {capacity} · DB {db} ·
+refreshing every {refresh}s · <a href="{text_url}">plain text</a></header>
+<main>{body}</main>
+<script>window.scrollTo(0, document.body.scrollHeight);</script>
+</body></html>
+"""
+
+
+def _log_lines(request) -> list[tuple[float, str]]:
+    with _LOG_LOCK:
+        entries = list(_LOG_BUFFER)
+    raw = request.query_params.get("lines")
+    if raw:
+        try:
+            n = max(1, min(int(raw), _LOG_CAPACITY))
+        except ValueError:
+            return entries
+        return entries[-n:]
+    return entries
+
+
+async def _log_handler(request):
+    """HTTP GET /log — recent server output, i.e. what `docker logs` shows.
+
+    HTML by default (auto-refreshing); plain text for `?format=text` or a
+    non-browser Accept header. Optional `SAM_LOG_TOKEN` gates access.
+    """
+    token = os.environ.get("SAM_LOG_TOKEN")
+    if token and not hmac.compare_digest(request.query_params.get("token", ""), token):
+        return PlainTextResponse("forbidden\n", status_code=403)
+
+    try:
+        entries = _log_lines(request)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+    # Browsers send an Accept containing text/html and get the page; curl and
+    # friends send */* and get plain text. ?format= overrides either way.
+    fmt = request.query_params.get("format")
+    if fmt in ("text", "html"):
+        wants_text = fmt == "text"
+    else:
+        wants_text = "text/html" not in request.headers.get("accept", "")
+
+    stamped = [(time.strftime("%H:%M:%S", time.gmtime(ts)), line) for ts, line in entries]
+
+    if wants_text:
+        text = "".join(f"{stamp} {line}\n" for stamp, line in stamped)
+        return PlainTextResponse(text or "(no output captured yet)\n")
+
+    if stamped:
+        rows = []
+        for stamp, line in stamped:
+            cls = "l"
+            if "FAILED" in line or "FATAL" in line or "ERROR" in line:
+                cls = "l err"
+            elif "WARNING" in line:
+                cls = "l warn"
+            rows.append(f'<div class="{cls}"><span class="t">{stamp}</span> {html.escape(line)}</div>')
+        body = "\n".join(rows)
+    else:
+        body = '<p class="empty">(no output captured yet)</p>'
+
+    # Keep token/lines when linking to the text view; the meta-refresh reloads
+    # the current URL, so those params survive on their own there.
+    keep = [(k, v) for k, v in request.query_params.items() if k != "format"]
+    text_url = "?" + urlencode([("format", "text"), *keep])
+
+    return HTMLResponse(_LOG_PAGE.format(
+        refresh=10,
+        count=len(entries),
+        capacity=_LOG_CAPACITY,
+        db=html.escape(str(DB_PATH)),
+        text_url=html.escape(text_url, quote=True),
+        body=body,
+    ))
+
+
 def main() -> None:
     import argparse
 
@@ -1007,6 +1186,13 @@ def main() -> None:
                    help="Trust X-Forwarded-* headers from a reverse proxy (e.g. NPM). "
                         "Implied when --allowed-hosts is set.")
     args = p.parse_args()
+
+    # HTTP mode only: in stdio mode stdout is the JSON-RPC channel, so there is
+    # nothing worth buffering. Installed before anything else prints (and before
+    # uvicorn.run, which resolves ext://sys.stdout|stderr at dictConfig time) so
+    # startup diagnostics and access logs both land in the buffer.
+    if args.http:
+        _install_log_capture()
 
     if not DB_PATH.exists():
         print(f"[sam-mcp] FATAL: database not found at {DB_PATH}. "
@@ -1035,6 +1221,7 @@ def main() -> None:
         # would orphan the lifespan and cause a 500 on /mcp.
         app = mcp.streamable_http_app()
         app.router.routes.insert(0, Route("/status", _status_handler))
+        app.router.routes.insert(0, Route("/log", _log_handler))
 
         print(f"[sam-mcp] HTTP listening on http://{args.host}:{args.port}/mcp",
               flush=True)
