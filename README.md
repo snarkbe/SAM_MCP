@@ -42,7 +42,7 @@ https://sam.reichert.be/mcp
 > exploration only — do not rely on it for production use. Self-host if you
 > need stability.
 
-## Examples it can answer:
+## Examples it can answer
 
 - "What is the dose of *Dafalgan 500*?"
 - "Which molecule does *Symbicort* contain?"
@@ -51,6 +51,9 @@ https://sam.reichert.be/mcp
 - "Is *Eliquis 5 mg* reimbursed, and at what base price?"
 - "What are the synonyms for *calcium pantothenate* in the compounding repertoire?"
 - "Which non-medicinal products contain *magnesium*?"
+- "Search everything for *vitamine d3* — is it a medicine, a supplement, or both, and who makes it?"
+- "Find *Dafalgan* in the CBIP/BCFI repertoire, even without knowing its CNK."
+- "Is this Dutch-only brand name actually in the database, in any form?"
 - "Which active substances have exactly one CNK on the Belgian market?"
 - "How many CNKs does metformin have?"
 - "List all proton-pump inhibitors (ATC A02BC) with their CNK count."
@@ -84,9 +87,10 @@ CBIP dump from <https://www.cbip.be/fr/download>.
    | `NONMEDICINAL` | Dietary supplements and other non-medicinal products |
    | `CMP` | Compounding (magistral) ingredients with multilingual synonyms |
    | `RML` | Reimbursement law hierarchy (legal bases, references, texts) |
+   | `IMPP` | Imported medicinal products (compassionate use / shortages) |
 
-   All seven loaders are optional — the ETL completes cleanly if a file is
-   absent. `CHAPTERIV` and `IMPP` are not yet imported.
+   All eight loaders are optional — the ETL completes cleanly if a file is
+   absent. `CHAPTERIV` is not yet imported.
 
 2. **Server** — `sam_mcp.server` is a FastMCP server that exposes read-only
    query tools over `sam.db`.
@@ -329,6 +333,7 @@ The script:
 | Tool | Purpose |
 | --- | --- |
 | `search_medicine(query, limit)` | Free-text search by brand / prescription name (FR/NL/EN, diacritics-insensitive). |
+| `search_everything(query, types, limit)` | **Discoverability router** — fuzzy search across `amp`, `substance`, `nonmedicinal`, `atc`, `impp` and `cbip_mp` in one call, grouped by type with true per-type match counts. Use when you don't know the entity type, a name might be misspelled, or a brand might be Dutch-only — then drill into the returned key with `get_medicine` / `find_by_substance` / `search_nonmedicinal` / `get_atc` / `find_imported` / `get_cbip_notes`. Not a substitute for `search_medicine` when the medicine name is already known. |
 | `get_medicine(identifier)` | Full record for a CNK or AMP code: form, route, ingredients, packs. |
 | `get_ingredients(identifier)` | Active substances + strengths only. Answers "what is the dose of X?". |
 | `find_by_substance(substance, limit)` | Reverse lookup: every AMP containing a molecule. |
@@ -338,6 +343,7 @@ The script:
 | `get_reimbursement(cnk)` | Reimbursement data for a CNK: base/reference prices, flat-rate flag, delivery environment, criteria. |
 | `search_nonmedicinal(query, limit)` | Search non-medicinal products (dietary supplements, etc.) by name. |
 | `find_compounding(query, limit)` | Find compounding/magistral ingredients by name or synonym. |
+| `find_imported(query, limit)` | Search imported medicinal products (IMPP) by name, CNK, or active substance — medicines brought in from abroad for compassionate use or shortages. |
 | `get_legal_text(text_key)` | Fetch a reimbursement law text by key (FR/NL content + parent context). |
 | `get_cbip_notes(cnk)` | CBIP/BCFI editorial commentary (chapter intro, positioning, notes) for a given CNK. Returns a `coverage` field: `"pack_level"` (direct CBIP pack entry, all price/reimbursement fields populated) or `"product_level"` (re-coded CNK resolved via SAM AMP sibling — product editorial data returned, pack-specific fields null). Returns `None` if outside the CBIP repertoire. |
 | `get_database_stats()` | Build metadata + row counts and descriptions for every table — what's searchable and how much of it there is. |
@@ -370,6 +376,29 @@ aggregate_substances(limit=2000, offset=2000)
 > introduced (ETL v1.6+). If the table is absent, the tool returns a warning key
 > instead of an error.
 
+### Full-text discoverability examples
+
+```text
+# One term, every entity type at once — grouped, with a true match count per type
+search_everything("paracetamol")
+
+# Restrict to specific types — also matches producer_fr/nl, e.g. "springfield"
+search_everything("vitamine d3", types=["nonmedicinal"])
+
+# A CBIP/BCFI-only brand name — resolves to a drillable pack-level CNK
+search_everything("dafalgan", types=["cbip_mp"])
+get_cbip_notes("<entity_key from above>")
+
+# Restrict to a handful of types instead of searching everything
+search_everything("omeprazole", types=["amp", "substance", "atc"])
+```
+
+`counts_by_type` reports the true number of matches per type even when the
+per-type result list is truncated by `limit` — e.g. you can tell "9 AMPs, 1
+substance, 214 nonmedicinal products" apart without 214 supplements drowning
+out the 9 medicines that actually mattered. `cbip_mp` is only searched if the
+DB was built with `--with-cbip`.
+
 ## Schema (high level)
 
 ```text
@@ -387,7 +416,13 @@ amp_ingredient(amp_code, component_seq, rank) -> substance + strength
 ampp(cti_extended PK, amp_code, pack info, price)
 dmpp(cnk PK, cti_extended, amp_code)
 amp_atc(amp_code, atc_code PK)                    -- AMP → ATC link (from AMP file Ampp/Atc)
-amp_fts, substance_fts                            -- FTS5 indexes
+amp_fts, substance_fts, nonmedicinal_fts,
+atc_fts, impp_fts                                 -- FTS5 indexes (+ cbip_mp_fts, optional CBIP)
+
+-- Imported medicines (IMPP)
+impp(id PK, cnk, name, country, strength, pack_size, pharma_form_*)
+impp_substance(impp_id, substance_code PK) -> name_fr/nl
+impp_route(impp_id, route_code PK) -> route_fr/nl
 
 -- Reimbursement
 reimbursement(cnk, delivery_environment, valid_from PK, prices, flags)
