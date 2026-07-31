@@ -198,6 +198,45 @@ curl http://localhost:8000/status
 }
 ```
 
+### Viewing the logs — `GET /log`
+
+Also in `--http` mode, `GET /log` shows the server's recent output — the same
+stream `docker logs sam-mcp` would give you: startup diagnostics, every tool
+call, uvicorn request logs and errors. Handy when the container is reachable
+over the LAN or through the reverse proxy but a shell on the host isn't.
+
+Open `http://localhost:8000/log` in a browser for a dark, auto-refreshing
+(10s) page; anything else — curl, scripts, monitoring — gets plain text:
+
+```bash
+curl http://localhost:8000/log            # plain text
+curl "http://localhost:8000/log?lines=50" # last 50 lines only
+```
+
+```text
+06:37:42 [sam-mcp] DB /data/sam.db (built: 2026-06-04 06:37:42, CBIP edition: 2026-07)
+06:37:42 [sam-mcp] row counts: amp=19841, ampp=100191, ...
+07:14:03 [sam-mcp] tool=search_medicine args={'query': 'dafalgan'} -> 12 item(s) in 3ms
+```
+
+| Query param | Meaning |
+| --- | --- |
+| `lines=N` | Show only the last N lines. |
+| `format=text` / `format=html` | Force the response type instead of guessing from `Accept`. |
+| `token=…` | Required when `SAM_LOG_TOKEN` is set (see below). |
+
+| Env var | Default | Meaning |
+| --- | --- | --- |
+| `SAM_LOG_LINES` | `2000` | Ring-buffer size. |
+| `SAM_LOG_TOKEN` | *(unset)* | If set, `/log` requires `?token=…` and returns **403** otherwise. Unset means open, like `/status`. |
+
+The buffer is **in memory only** — it holds the last `SAM_LOG_LINES` lines and
+starts empty after every container restart. It is not a replacement for
+`docker logs`, just a convenient window onto the same output. Requests to
+`/log` itself are excluded from the buffer so the page's auto-refresh doesn't
+crowd out real activity. In stdio mode nothing is captured (stdout is the
+JSON-RPC channel there and there's no HTTP server to serve the page).
+
 `cbip_export_date` is the month of the CBIP edition (`YYYY-MM`), read from the
 dump itself — its PostgreSQL schema name (`SET SEARCH_PATH TO r2607_sql_fr`)
 encodes the edition as `r` + YYMM, and `cbip_edition` keeps that raw code
