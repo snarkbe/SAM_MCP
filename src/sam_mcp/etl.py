@@ -184,6 +184,40 @@ def sync_substance_fts(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def sync_atc_fts(conn: sqlite3.Connection) -> None:
+    """Rebuild atc_fts from the atc table."""
+    cur = conn.cursor()
+    cur.execute("DELETE FROM atc_fts")
+    cur.execute(
+        "INSERT INTO atc_fts(code, description) "
+        "SELECT code, COALESCE(description,'') FROM atc"
+    )
+    conn.commit()
+
+
+def sync_nonmedicinal_fts(conn: sqlite3.Connection) -> None:
+    """Rebuild nonmedicinal_fts from the nonmedicinal table."""
+    cur = conn.cursor()
+    cur.execute("DELETE FROM nonmedicinal_fts")
+    cur.execute(
+        "INSERT INTO nonmedicinal_fts(code, name_fr, name_nl, producer_fr, producer_nl) "
+        "SELECT code, COALESCE(name_fr,''), COALESCE(name_nl,''), "
+        "COALESCE(producer_fr,''), COALESCE(producer_nl,'') FROM nonmedicinal"
+    )
+    conn.commit()
+
+
+def sync_impp_fts(conn: sqlite3.Connection) -> None:
+    """Rebuild impp_fts from the impp table."""
+    cur = conn.cursor()
+    cur.execute("DELETE FROM impp_fts")
+    cur.execute(
+        "INSERT INTO impp_fts(cnk, name) "
+        "SELECT cnk, COALESCE(name,'') FROM impp"
+    )
+    conn.commit()
+
+
 # --------------------------------------------------------------------------
 # AMP
 # --------------------------------------------------------------------------
@@ -907,6 +941,8 @@ def main() -> int:
         else:
             print("! no REF file found", file=sys.stderr)
 
+    sync_atc_fts(conn)
+
     if not args.skip_amp:
         amp = find_file(args.data, "AMP")
         if amp:
@@ -928,11 +964,17 @@ def main() -> int:
         if f:
             loader(conn, f, today)
 
+    sync_nonmedicinal_fts(conn)
+    sync_impp_fts(conn)
+
     # Build AMP FTS contents (already populated row-by-row in load_amp;
     # nothing more needed here, but optimize the FTS index).
     print("[FTS] optimizing")
     conn.execute("INSERT INTO amp_fts(amp_fts) VALUES('optimize')")
     conn.execute("INSERT INTO substance_fts(substance_fts) VALUES('optimize')")
+    conn.execute("INSERT INTO atc_fts(atc_fts) VALUES('optimize')")
+    conn.execute("INSERT INTO nonmedicinal_fts(nonmedicinal_fts) VALUES('optimize')")
+    conn.execute("INSERT INTO impp_fts(impp_fts) VALUES('optimize')")
     conn.commit()
     conn.execute("VACUUM")
     conn.close()

@@ -116,6 +116,123 @@ def search_medicine(query: str, limit: int = 20) -> list[dict[str, Any]]:
     return [_row_to_dict(r) for r in rows]
 
 
+_SEARCH_ARMS: dict[str, str] = {
+    "amp": """
+        SELECT f.amp_code AS entity_key, a.name_fr, a.name_nl
+          FROM amp_fts f JOIN amp a ON a.code = f.amp_code
+         WHERE amp_fts MATCH ?
+         ORDER BY rank LIMIT ?
+    """,
+    "substance": """
+        SELECT substance_code AS entity_key, name_fr, name_nl
+          FROM substance_fts
+         WHERE substance_fts MATCH ?
+         ORDER BY rank LIMIT ?
+    """,
+    "nonmedicinal": """
+        SELECT code AS entity_key, name_fr, name_nl
+          FROM nonmedicinal_fts
+         WHERE nonmedicinal_fts MATCH ?
+         ORDER BY rank LIMIT ?
+    """,
+    "atc": """
+        SELECT code AS entity_key, description
+          FROM atc_fts
+         WHERE atc_fts MATCH ?
+         ORDER BY rank LIMIT ?
+    """,
+    "impp": """
+        SELECT cnk AS entity_key, name
+          FROM impp_fts
+         WHERE impp_fts MATCH ?
+         ORDER BY rank LIMIT ?
+    """,
+    # cbip_mp_fts is product-level (mpcv), but get_cbip_notes and every other
+    # CBIP-aware tool key off a pack-level CNK (cbip_mpp.mppcv). Resolve to
+    # one representative pack CNK per product so the result is drillable.
+    "cbip_mp": """
+        SELECT MIN(p.mppcv) AS entity_key, m.mpnm AS name
+          FROM cbip_mp_fts f
+          JOIN cbip_mp  m ON m.mpcv = f.mpcv
+          JOIN cbip_mpp p ON p.mpcv = m.mpcv
+         WHERE cbip_mp_fts MATCH ?
+         GROUP BY f.mpcv, m.mpnm
+         ORDER BY MIN(f.rank) LIMIT ?
+    """,
+}
+
+_SEARCH_COUNT_SQL: dict[str, str] = {
+    "amp": "SELECT COUNT(*) FROM amp_fts WHERE amp_fts MATCH ?",
+    "substance": "SELECT COUNT(*) FROM substance_fts WHERE substance_fts MATCH ?",
+    "nonmedicinal": "SELECT COUNT(*) FROM nonmedicinal_fts WHERE nonmedicinal_fts MATCH ?",
+    "atc": "SELECT COUNT(*) FROM atc_fts WHERE atc_fts MATCH ?",
+    "impp": "SELECT COUNT(*) FROM impp_fts WHERE impp_fts MATCH ?",
+    "cbip_mp": "SELECT COUNT(*) FROM cbip_mp_fts WHERE cbip_mp_fts MATCH ?",
+}
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
+def search_everything(query: str, types: list[str] | None = None,
+                       limit: int = 10) -> dict[str, Any]:
+    """
+    Fuzzy discoverability search across medicines, substances, nonmedicinal
+    products, ATC codes, imported medicines (IMPP) and CBIP products in one
+    call. Matches French, Dutch and English text with diacritics ignored.
+
+    Use this when you do not know which entity type you are looking for,
+    when a name might be misspelled, when a brand name might be Dutch-only,
+    or to check whether something exists in the database at all. It is a
+    ROUTER, not a terminus: take the entity_key from a hit and call
+    get_medicine / get_ingredients / find_by_substance / search_nonmedicinal /
+    get_atc / find_imported / get_cbip_notes for authoritative details — do
+    not answer directly from these fuzzy matches.
+
+    Do NOT use this instead of search_medicine when the medicine name is
+    already known: search_medicine's ranking is specific to AMPs, while this
+    tool spreads results across unrelated entity types and will be noisier.
+
+    Parameters
+    ----------
+    query : free text to search for
+    types : subset of {'amp', 'substance', 'nonmedicinal', 'atc', 'impp',
+            'cbip_mp'} to search. Defaults to all types available in this DB
+            build ('cbip_mp' is skipped automatically if CBIP wasn't loaded).
+    limit : max hits returned PER TYPE, not total (default 10, max 50).
+            counts_by_type reports the true match count even when truncated,
+            so e.g. 200 nonmedicinal matches are visible even if only 10 show.
+
+    Returns {"counts_by_type": {type: total_matches}, "results": {type: [hits]}}.
+    Only types that were actually searched appear in either dict. Hit shape
+    varies by type:
+      - amp / substance / nonmedicinal: {entity_key, name_fr, name_nl}
+      - atc: {entity_key, description}
+      - impp: {entity_key, name}
+      - cbip_mp: {entity_key, name} — entity_key is one representative pack
+        CNK for the product; call get_cbip_notes for the full pack list.
+    """
+    q = _fts_query(query)
+    lim = max(1, min(limit, 50))
+    requested = types if types else list(_SEARCH_ARMS)
+    unknown = [t for t in requested if t not in _SEARCH_ARMS]
+    if unknown:
+        raise ValueError(f"Unknown type(s) {unknown}; valid types are {list(_SEARCH_ARMS)}")
+
+    counts: dict[str, int] = {}
+    results: dict[str, list[dict[str, Any]]] = {}
+    with db() as conn:
+        for t in requested:
+            if t == "cbip_mp" and not _has_cbip(conn):
+                continue
+            count = conn.execute(_SEARCH_COUNT_SQL[t], (q,)).fetchone()[0]
+            counts[t] = count
+            results[t] = (
+                [_row_to_dict(r) for r in conn.execute(_SEARCH_ARMS[t], (q, lim)).fetchall()]
+                if count else []
+            )
+
+    return {"counts_by_type": counts, "results": results}
+
+
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
 def get_medicine(identifier: str) -> dict[str, Any] | None:
     """

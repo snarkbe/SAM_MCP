@@ -128,6 +128,24 @@ CREATE VIRTUAL TABLE IF NOT EXISTS substance_fts USING fts5(
     tokenize='unicode61 remove_diacritics 2'
 );
 
+CREATE VIRTUAL TABLE IF NOT EXISTS nonmedicinal_fts USING fts5(
+    code UNINDEXED,
+    name_fr, name_nl, producer_fr, producer_nl,
+    tokenize='unicode61 remove_diacritics 2'
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS atc_fts USING fts5(
+    code UNINDEXED,
+    description,
+    tokenize='unicode61 remove_diacritics 2'
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS impp_fts USING fts5(
+    cnk UNINDEXED,
+    name,
+    tokenize='unicode61 remove_diacritics 2'
+);
+
 -- VMP -----------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS vtm (
     code       TEXT PRIMARY KEY,
