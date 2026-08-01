@@ -832,13 +832,15 @@ def _legal_text_root(text_key: str, rows_by_key: dict[str, sqlite3.Row]) -> str:
     return text_key  # cycle guard; should not happen on well-formed data
 
 
-def _legal_text_sort_key(version: dict[str, Any]) -> tuple[str, int]:
-    root_text_key = version["root_text_key"]
+def _safe_int(value: Any) -> int:
     try:
-        numeric_key = int(root_text_key)
+        return int(value)
     except (TypeError, ValueError):
-        numeric_key = 0
-    return (version["valid_from"] or "", numeric_key)
+        return 0
+
+
+def _legal_text_sort_key(version: dict[str, Any]) -> tuple[str, int]:
+    return (version["valid_from"] or "", _safe_int(version["root_text_key"]))
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
@@ -856,9 +858,15 @@ def get_legal_text(text_key: str, latest_only: bool = True) -> dict[str, Any] | 
       historical revision of that paragraph, each `{root_text_key,
       valid_from, valid_to, texts: [...]}` with `texts` in sequence order.
       A paragraph amended over the years accumulates several parallel text
-      trees in legal_text (e.g. one root per revision, each root's own
-      subtree renumbering sequence_nr from 1) -- grouping by root keeps a
-      2020 revision from interleaving with the 2024 one that superseded it.
+      trees in legal_text (one root per revision, each root's own subtree
+      renumbering sequence_nr from 1); a revision's texts are grouped by
+      its root's (valid_from, valid_to) validity window rather than by the
+      root text_key itself, because some paragraphs are exported as several
+      flat, parentless sibling nodes sharing one window instead of a single
+      tree -- keying on text_key would fragment one such revision into one
+      spurious single-paragraph "version" per sibling. Grouping by window
+      also keeps a 2020 revision from interleaving with the 2024 one that
+      superseded it, since the two windows never overlap.
       `latest_only=True` (default) returns only the most recent version;
       set it to False to see the full amendment history. "Most recent" is
       determined by `valid_from` descending (every legal_text row in this
@@ -895,20 +903,49 @@ def get_legal_text(text_key: str, latest_only: bool = True) -> dict[str, Any] | 
                     (basis_key, paragraph),
                 ).fetchall()
 
+                # Group by each node's root VALIDITY WINDOW, not by the root
+                # text_key itself: some paragraphs are exported as several
+                # flat, parentless sibling nodes (no shared root text_key)
+                # that all belong to one and the same revision. Keying on
+                # text_key would fragment that single revision into one
+                # spurious one-paragraph "version" per sibling -- confirmed
+                # on RD20180201-IV-12410000 (Revlimid's chapter IV
+                # condition), which has 22 parentless siblings all sharing
+                # one window; grouping by root text_key split it into 22
+                # versions of 1 text each, so latest_only=True returned only
+                # the last paragraph and silently dropped the other 21.
                 rows_by_key = {r["text_key"]: r for r in rows}
-                grouped: dict[str, list[sqlite3.Row]] = {}
+                windows_by_root: dict[str, tuple[str | None, str | None]] = {}
+                grouped: dict[tuple[str | None, str | None], list[sqlite3.Row]] = {}
+                roots_by_window: dict[tuple[str | None, str | None], set[str]] = {}
                 for r in rows:
                     root = _legal_text_root(r["text_key"], rows_by_key)
-                    grouped.setdefault(root, []).append(r)
+                    root_row = rows_by_key.get(root)
+                    window = windows_by_root.get(root)
+                    if window is None:
+                        window = (
+                            (root_row["valid_from"] if root_row else None),
+                            (root_row["valid_to"] if root_row else None),
+                        )
+                        windows_by_root[root] = window
+                    grouped.setdefault(window, []).append(r)
+                    roots_by_window.setdefault(window, set()).add(root)
 
                 versions = []
-                for root_text_key, group_rows in grouped.items():
-                    root_row = rows_by_key.get(root_text_key)
+                for (valid_from, valid_to), group_rows in grouped.items():
+                    # Representative id for sorting/display when a window is
+                    # shared by several flat sibling roots: the highest one,
+                    # since higher keys are assigned later (see
+                    # _legal_text_sort_key).
+                    representative_root = max(roots_by_window[(valid_from, valid_to)], key=_safe_int)
                     versions.append({
-                        "root_text_key": root_text_key,
-                        "valid_from": root_row["valid_from"] if root_row else None,
-                        "valid_to":   root_row["valid_to"] if root_row else None,
-                        "texts": [_row_to_dict(r) for r in group_rows],
+                        "root_text_key": representative_root,
+                        "valid_from": valid_from,
+                        "valid_to":   valid_to,
+                        "texts": sorted(
+                            (_row_to_dict(r) for r in group_rows),
+                            key=lambda t: _safe_int(t["sequence_nr"]),
+                        ),
                     })
                 versions.sort(key=_legal_text_sort_key, reverse=True)
                 if latest_only and versions:
@@ -965,6 +1002,27 @@ def _collect_counts(conn: sqlite3.Connection) -> dict[str, int]:
     return counts
 
 
+_CBIP_PRICE_FIELDS = ("public_price", "index", "rema", "remw")
+
+
+def _flag_cbip_price_placeholder(result: dict[str, Any]) -> None:
+    """Detect CBIP's zero-price placeholder and null it out, in place.
+
+    ~19% of cbip_mpp packs carry public_price=0 together with index/rema/remw
+    all zero -- verified DB-wide (1670/8747 packs), not limited to parallel
+    imports: the same all-zero pattern shows up on e.g. reimbursed
+    lenalidomide generics, which certainly have a real public price. This is
+    never a genuine EUR 0.00 in the Belgian public-price system; treat it as
+    "CBIP does not track pricing for this pack" and flag it explicitly rather
+    than let a raw 0.0 read as "free of charge". No-op when public_price is
+    already None (e.g. product_level coverage, which nulls it separately).
+    """
+    result["cbip_price_placeholder"] = result.get("public_price") == 0
+    if result["cbip_price_placeholder"]:
+        for field in _CBIP_PRICE_FIELDS:
+            result[field] = None
+
+
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
 def get_cbip_notes(cnk: str) -> dict[str, Any] | None:
     """
@@ -981,6 +1039,14 @@ def get_cbip_notes(cnk: str) -> dict[str, Any] | None:
       re-coded 77xxxxx CNKs) but a sibling pack for the same SAM AMP was
       found; product-level editorial data is returned and pack-specific
       fields are null.
+
+    The result also always contains ``cbip_price_placeholder``: true when
+    CBIP's own pack record has public_price = 0 (about 19% of pack_level
+    CBIP packs, e.g. hospital-restricted specialties and some parallel
+    imports -- CBIP simply does not track a public price for these, it is
+    never a genuine EUR 0.00). When true, public_price/index/rema/remw are
+    all returned as null instead of a raw, misleading 0.0 -- treat this the
+    same way as strength_missing: a genuine unknown, never zero.
 
     Returns None if neither a pack-level nor a product-level match exists
     (the CBIP curates a subset of all SAM medicines).
@@ -1080,6 +1146,7 @@ def get_cbip_notes(cnk: str) -> dict[str, Any] | None:
             (substances_cnk,),
         ).fetchall()]
         result["substances"] = substances
+        _flag_cbip_price_placeholder(result)
         return result
 
 
@@ -1090,7 +1157,9 @@ def _pack_identities(conn: sqlite3.Connection, cnks: list[str]) -> dict[str, dic
         f"""
         SELECT d.cnk, a.code AS amp_code, a.name_fr, a.name_nl, a.company, a.status,
                c.pharma_form_fr, c.pharma_form_nl, c.route_fr, c.route_nl,
-               p.pack_display_fr, p.pack_display_nl, p.delivery_modus, p.ex_factory_price
+               p.pack_display_fr, p.pack_display_nl, p.delivery_modus, p.ex_factory_price,
+               (SELECT COUNT(*) FROM amp_component ac WHERE ac.amp_code = a.code)
+                                                        AS component_count
           FROM dmpp d
           JOIN amp a ON a.code = d.amp_code
      LEFT JOIN ampp p ON p.cti_extended = d.cti_extended
@@ -1099,7 +1168,12 @@ def _pack_identities(conn: sqlite3.Connection, cnks: list[str]) -> dict[str, dic
         """,
         cnks,
     ).fetchall()
-    return {row["cnk"]: _row_to_dict(row) for row in rows}
+    identities = {}
+    for row in rows:
+        entry = _row_to_dict(row)
+        entry["multi_component"] = entry["component_count"] > 1
+        identities[row["cnk"]] = entry
+    return identities
 
 
 def _pack_substances(conn: sqlite3.Connection, amp_codes: list[str]) -> dict[str, list[dict[str, Any]]]:
@@ -1144,6 +1218,7 @@ def _cbip_overview_entry(row: sqlite3.Row, coverage: str) -> dict[str, Any]:
         # Pack-specific fields have no meaning when resolved via a sibling pack.
         for field in ("public_price", "index", "rema", "remw", "law", "ssecr"):
             entry[field] = None
+    _flag_cbip_price_placeholder(entry)
     return entry
 
 
@@ -1236,20 +1311,34 @@ def get_pack_overview(
 
     - identity: {amp_code, name_fr, name_nl, company, status, pharma_form_fr,
       pharma_form_nl, route_fr, route_nl, pack_display_fr, pack_display_nl,
-      delivery_modus, ex_factory_price}. pharma_form/route reflect AMP
-      component #1 -- call get_medicine for multi-component detail.
+      delivery_modus, ex_factory_price, component_count, multi_component}.
+      pharma_form/route reflect AMP component #1 only -- call get_medicine
+      for the full per-component breakdown. multi_component is true when
+      component_count > 1 (e.g. a multiphasic contraceptive like Qlaira,
+      whose pill strip has several distinct tablet types): when true, the
+      `substances` list below mixes ingredients from every component with
+      no per-component grouping, so the same substance_code can legitimately
+      appear several times at different strengths -- that means different
+      phases, not a contradiction. Check this flag before reading
+      `substances` at face value; call get_medicine for the per-component
+      strengths.
     - substances: list of active substances with strength (quantity/unit/
       operator) and a `strength_missing` flag, true when the SAM source
       export itself has no strength for that substance -- never inferred
-      from the medicine's name (see get_ingredients).
+      from the medicine's name (see get_ingredients). Flat across all AMP
+      components -- see `multi_component` above.
     - reimbursement: list of currently-active tranche(s), same shape as
       get_reimbursement -- usually a single entry, but can hold more than
       one when several delivery environments are simultaneously active.
     - cbip: {public_price, index, rema, remw, law, ssecr,
       flags: {bt, orphan, narcotic, specrules}, chapter_code, chapter_title,
-      chapter_positioning, coverage}. coverage is "pack_level" or
-      "product_level" (same fallback as get_cbip_notes; pack-specific
-      fields are null at product level).
+      chapter_positioning, coverage, cbip_price_placeholder}. coverage is
+      "pack_level" or "product_level" (same fallback as get_cbip_notes;
+      pack-specific fields are null at product level). cbip_price_placeholder
+      is true when CBIP's own record has public_price = 0 (~19% of
+      pack_level CBIP packs, e.g. hospital-restricted specialties -- never
+      a genuine EUR 0.00); when true, public_price/index/rema/remw are null
+      rather than a raw, misleading 0.0.
     """
     cnks = [c.strip() for c in cnks]
     if not cnks or len(cnks) > 50:

@@ -40,6 +40,9 @@ CNK_NOT_REIMBURSED_CBIP_FALLBACK = "2843183"
 CNK_UNKNOWN = "9999999"
 AMP_ELIQUIS_1_5MG = "SAM663104-00"  # strength gap in the SAM source itself
 AMP_ELIQUIS_2MG = "SAM663105-00"
+CNK_QLAIRA_MULTICOMPONENT = "2597003"  # 5 AMP components (multiphasic pill)
+CNK_CBIP_ZERO_PRICE_A = "4272175"  # Eliquis 5mg parallel import, CBIP pupr=0
+CNK_CBIP_ZERO_PRICE_B = "4201810"  # Eliquis 2.5mg parallel import, CBIP pupr=0
 
 
 def _count_sql_statements(fn, *args, **kwargs):
@@ -232,6 +235,26 @@ class TestGetLegalText(DbBackedTestCase):
         self.assertIsNone(server.get_legal_text("0"))
 
 
+class TestGetLegalTextFlatSiblingGrouping(DbBackedTestCase):
+    # Revlimid's chapter IV paragraph: 22 parentless sibling text_keys
+    # sharing one validity window. Grouping by root text_key used to treat
+    # each sibling as its own version, so latest_only=True (default) kept
+    # only the last paragraph and silently dropped the other 21.
+    REF = "RD20180201-IV-12410000"
+
+    def test_latest_only_returns_every_paragraph_in_one_version(self):
+        result = server.get_legal_text(self.REF)
+        self.assertEqual(len(result["versions"]), 1)
+        texts = result["versions"][0]["texts"]
+        self.assertEqual(len(texts), 22)
+        self.assertEqual([t["sequence_nr"] for t in texts], list(range(1, 23)))
+
+    def test_full_history_is_the_same_single_version(self):
+        result = server.get_legal_text(self.REF, latest_only=False)
+        self.assertEqual(len(result["versions"]), 1)
+        self.assertEqual(len(result["versions"][0]["texts"]), 22)
+
+
 class TestStrengthMissingFlag(DbBackedTestCase):
     def test_eliquis_1_5mg_has_no_strength_in_the_sam_source(self):
         ingredients = server.get_ingredients(AMP_ELIQUIS_1_5MG)
@@ -246,6 +269,52 @@ class TestStrengthMissingFlag(DbBackedTestCase):
         self.assertEqual(len(active), 1)
         self.assertFalse(active[0]["strength_missing"])
         self.assertEqual(active[0]["strength_quantity"], "2.0000")
+
+
+class TestMultiComponentFlag(DbBackedTestCase):
+    def test_qlaira_reports_five_components(self):
+        result = server.get_pack_overview([CNK_QLAIRA_MULTICOMPONENT])
+        identity = result["packs"][CNK_QLAIRA_MULTICOMPONENT]["identity"]
+        self.assertEqual(identity["component_count"], 5)
+        self.assertTrue(identity["multi_component"])
+
+    def test_mono_component_pack_is_not_flagged(self):
+        result = server.get_pack_overview([CNK_REIMBURSED_WITH_HISTORY])
+        identity = result["packs"][CNK_REIMBURSED_WITH_HISTORY]["identity"]
+        self.assertEqual(identity["component_count"], 1)
+        self.assertFalse(identity["multi_component"])
+
+
+class TestCbipPricePlaceholder(DbBackedTestCase):
+    def test_zero_price_packs_are_flagged_and_nulled(self):
+        for cnk in (CNK_CBIP_ZERO_PRICE_A, CNK_CBIP_ZERO_PRICE_B):
+            with self.subTest(cnk=cnk):
+                result = server.get_pack_overview([cnk])
+                cbip = result["packs"][cnk]["cbip"]
+                self.assertIsNotNone(cbip)
+                self.assertTrue(cbip["cbip_price_placeholder"])
+                for field in ("public_price", "index", "rema", "remw"):
+                    self.assertIsNone(cbip[field])
+
+    def test_get_cbip_notes_also_flags_zero_price(self):
+        notes = server.get_cbip_notes(CNK_CBIP_ZERO_PRICE_A)
+        self.assertTrue(notes["cbip_price_placeholder"])
+        self.assertIsNone(notes["public_price"])
+
+    def test_real_priced_pack_is_not_flagged(self):
+        result = server.get_pack_overview([CNK_REIMBURSED_WITH_HISTORY])
+        cbip = result["packs"][CNK_REIMBURSED_WITH_HISTORY]["cbip"]
+        self.assertFalse(cbip["cbip_price_placeholder"])
+        self.assertIsNotNone(cbip["public_price"])
+
+    def test_product_level_fallback_is_not_flagged(self):
+        # product_level already nulls public_price for an unrelated reason
+        # (no pack-specific data at that CNK at all) -- the placeholder flag
+        # must not also fire on top of that.
+        result = server.get_pack_overview([CNK_NOT_REIMBURSED_CBIP_FALLBACK])
+        cbip = result["packs"][CNK_NOT_REIMBURSED_CBIP_FALLBACK]["cbip"]
+        self.assertEqual(cbip["coverage"], "product_level")
+        self.assertFalse(cbip["cbip_price_placeholder"])
 
 
 if __name__ == "__main__":
