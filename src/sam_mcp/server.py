@@ -31,9 +31,10 @@ from urllib.parse import urlencode
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
-from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 
 DB_PATH = Path(os.environ.get("SAM_DB", "db/sam.db"))
+ASSETS = Path(__file__).resolve().parent  # favicon.svg / favicon.ico ship with the package
 
 mcp = FastMCP("sam")
 
@@ -76,10 +77,11 @@ class _TeeStream:
         now = time.time()
         with _LOG_LOCK:
             for line in lines:
-                # Skip uvicorn's own access lines for /log, otherwise the page's
-                # auto-refresh would fill the buffer with records of itself.
-                # Access format: 1.2.3.4:5678 - "GET /log HTTP/1.1" 200 OK
-                if '"GET /log' in line:
+                # Skip uvicorn's own access lines for /log and its favicon,
+                # otherwise the page's auto-refresh would fill the buffer with
+                # records of itself. Access format:
+                # 1.2.3.4:5678 - "GET /log HTTP/1.1" 200 OK
+                if '"GET /log' in line or '"GET /favicon' in line:
                     continue
                 _LOG_BUFFER.append((now, line))
 
@@ -1069,10 +1071,35 @@ async def _status_handler(request) -> JSONResponse:
     return JSONResponse({"meta": meta, "tables": tables})
 
 
+_FAVICONS = {
+    "/favicon.svg": "image/svg+xml",
+    "/favicon.ico": "image/x-icon",
+}
+
+
+async def _favicon_handler(request):
+    """HTTP GET /favicon.svg | /favicon.ico — the tab icon for /log."""
+    name = request.url.path.rsplit("/", 1)[-1]
+    media_type = _FAVICONS.get(f"/{name}")
+    if media_type is None:
+        return PlainTextResponse("not found\n", status_code=404)
+    try:
+        data = (ASSETS / name).read_bytes()
+    except OSError:
+        # A packaging slip shouldn't turn into a 500 on every page load.
+        return PlainTextResponse("not found\n", status_code=404)
+    # /log meta-refreshes every 10s; without this the browser would re-fetch
+    # the icon on each reload and clutter the access log.
+    return Response(data, media_type=media_type,
+                    headers={"Cache-Control": "public, max-age=86400"})
+
+
 _LOG_PAGE = """<!doctype html>
 <html><head><meta charset="utf-8">
 <meta http-equiv="refresh" content="{refresh}">
 <title>sam-mcp log</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="alternate icon" href="favicon.ico" sizes="32x32 16x16">
 <style>
   :root {{ color-scheme: dark; }}
   body {{ margin: 0; background: #11131a; color: #d5d8e0;
@@ -1222,6 +1249,8 @@ def main() -> None:
         app = mcp.streamable_http_app()
         app.router.routes.insert(0, Route("/status", _status_handler))
         app.router.routes.insert(0, Route("/log", _log_handler))
+        for _path in _FAVICONS:
+            app.router.routes.insert(0, Route(_path, _favicon_handler))
 
         print(f"[sam-mcp] HTTP listening on http://{args.host}:{args.port}/mcp",
               flush=True)

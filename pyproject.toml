@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sam-mcp"
-version = "1.12.0"
+version = "1.12.1"
 description = "MCP server exposing the Belgian SAM v2 medicines dataset over SQLite."
 requires-python = ">=3.10"
 dependencies = [
@@ -22,7 +22,7 @@ where = ["src"]
 include = ["sam_mcp*"]
 
 [tool.setuptools.package-data]
-sam_mcp = ["schema.sql"]
+sam_mcp = ["schema.sql", "favicon.svg", "favicon.ico"]
 
 [tool.uv]
 package = true
