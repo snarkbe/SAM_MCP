@@ -24,6 +24,7 @@ import threading
 import time
 from collections import deque
 from contextlib import contextmanager
+from datetime import date
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -417,6 +418,12 @@ def get_ingredients(identifier: str) -> list[dict[str, Any]]:
     Return active substances and strengths for a given medicine.
     Identifier can be a CNK or an AMP code. This is the answer to
     "which molecules does X contain?" and "what is the dose of X?".
+
+    Each entry carries `strength_missing: true` when strength_quantity is
+    NULL -- this happens when the SAM source export itself has no <Strength>
+    for that substance (e.g. AMP SAM663104-00 / Eliquis 1.5 mg, whose active
+    ingredient is declared with no strength upstream). Never inferred from
+    the medicine's name; treat it as genuinely unknown, not zero.
     """
     with db() as conn:
         codes = _resolve_to_amp_codes(conn, identifier)
@@ -433,7 +440,10 @@ def get_ingredients(identifier: str) -> list[dict[str, Any]]:
             """,
             (codes[0],),
         ).fetchall()
-    return [_row_to_dict(r) for r in rows]
+    results = [_row_to_dict(r) for r in rows]
+    for entry in results:
+        entry["strength_missing"] = entry["strength_quantity"] is None
+    return results
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
@@ -615,42 +625,98 @@ def get_atc(query: str, limit: int = 20) -> list[dict[str, Any]]:
     return [_row_to_dict(r) for r in rows]
 
 
+def _reimbursement_for_cnks(
+    conn: sqlite3.Connection, cnks: list[str], as_of: str, include_history: bool
+) -> dict[str, list[dict[str, Any]]]:
+    """Batched, temporally-filtered reimbursement lookup for 1..N CNKs.
+
+    Issues exactly two queries (reimbursement rows, then their criteria)
+    regardless of how many CNKs are requested -- never one query per CNK.
+    Every returned tranche carries `is_current`, true when it is valid at
+    `as_of` (`valid_from <= as_of` and `valid_to` is NULL or `>= as_of`).
+    When `include_history` is False, non-current tranches are dropped.
+
+    Returns {cnk: [tranche, ...]}; a CNK with no reimbursement record at all,
+    or none matching after filtering, is simply absent from the dict.
+    """
+    placeholders = ",".join("?" * len(cnks))
+    rows = conn.execute(
+        f"SELECT cnk, delivery_environment, valid_from, valid_to, legal_reference,"
+        f" temporary, is_reference, flat_rate_system,"
+        f" reimbursement_price, reference_price,"
+        f" pricing_unit_qty, pricing_unit_fr, pricing_unit_nl"
+        f" FROM reimbursement WHERE cnk IN ({placeholders})"
+        f" ORDER BY cnk, valid_from",
+        cnks,
+    ).fetchall()
+    if not rows:
+        return {}
+
+    criteria_rows = conn.execute(
+        f"SELECT cnk, delivery_environment, valid_from, category, code,"
+        f" description_fr, description_nl"
+        f" FROM reimbursement_criterion WHERE cnk IN ({placeholders})",
+        cnks,
+    ).fetchall()
+    criteria_by_tranche: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for r in criteria_rows:
+        key = (r["cnk"], r["delivery_environment"], r["valid_from"])
+        criteria_by_tranche.setdefault(key, []).append({
+            "category":       r["category"],
+            "code":           r["code"],
+            "description_fr": r["description_fr"],
+            "description_nl": r["description_nl"],
+        })
+
+    by_cnk: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        is_current = row["valid_from"] <= as_of and (
+            row["valid_to"] is None or row["valid_to"] >= as_of
+        )
+        if not include_history and not is_current:
+            continue
+        entry = _row_to_dict(row)
+        entry["pricing_unit"] = {
+            "quantity":  entry.pop("pricing_unit_qty"),
+            "label_fr":  entry.pop("pricing_unit_fr"),
+            "label_nl":  entry.pop("pricing_unit_nl"),
+        }
+        entry["is_current"] = is_current
+        entry["criteria"] = criteria_by_tranche.get(
+            (row["cnk"], row["delivery_environment"], row["valid_from"]), []
+        )
+        by_cnk.setdefault(row["cnk"], []).append(entry)
+    return by_cnk
+
+
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-def get_reimbursement(cnk: str) -> list[dict[str, Any]] | None:
+def get_reimbursement(
+    cnk: str, as_of: str | None = None, include_history: bool = False
+) -> list[dict[str, Any]] | None:
     """
     Return reimbursement data for a Belgian medicine by CNK.
     Includes base/reference prices, flat-rate flag, delivery environment and
-    reimbursement criteria (category + description). Returns None if the CNK
-    has no reimbursement record.
+    reimbursement criteria (category + description).
+
+    By default only the tranche(s) valid on `as_of` (ISO date, default today)
+    are returned, each marked `is_current: true` -- older or not-yet-started
+    tranches (e.g. one that lapsed years ago) are hidden, so a caller reading
+    `reimbursement_price` cannot accidentally quote a dead price. Pass
+    `include_history=True` to get every tranche ever recorded, current or
+    not, each still carrying `is_current` relative to `as_of`.
+
+    Returns None if the CNK has no reimbursement record at all, or none
+    matching the current filter.
+
+    Looking up several CNKs at once? get_pack_overview batches this together
+    with get_cbip_notes in a single call instead of one get_reimbursement
+    call per CNK.
     """
     cnk = cnk.strip()
+    as_of_date = as_of.strip() if as_of else date.today().isoformat()
     with db() as conn:
-        rows = conn.execute(
-            "SELECT cnk, delivery_environment, valid_from, valid_to, legal_reference,"
-            " temporary, is_reference, flat_rate_system,"
-            " reimbursement_price, reference_price,"
-            " pricing_unit_qty, pricing_unit_fr, pricing_unit_nl"
-            " FROM reimbursement WHERE cnk = ?",
-            (cnk,),
-        ).fetchall()
-        if not rows:
-            return None
-        results = []
-        for row in rows:
-            entry = _row_to_dict(row)
-            entry["pricing_unit"] = {
-                "quantity":  entry.pop("pricing_unit_qty"),
-                "label_fr":  entry.pop("pricing_unit_fr"),
-                "label_nl":  entry.pop("pricing_unit_nl"),
-            }
-            entry["criteria"] = [_row_to_dict(r) for r in conn.execute(
-                "SELECT category, code, description_fr, description_nl"
-                " FROM reimbursement_criterion"
-                " WHERE cnk = ? AND delivery_environment = ? AND valid_from = ?",
-                (cnk, row["delivery_environment"], row["valid_from"]),
-            ).fetchall()]
-            results.append(entry)
-    return results
+        results = _reimbursement_for_cnks(conn, [cnk], as_of_date, include_history).get(cnk)
+    return results if results else None
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
@@ -754,23 +820,55 @@ def find_imported(query: str, limit: int = 50) -> list[dict[str, Any]]:
     return results
 
 
+def _legal_text_root(text_key: str, rows_by_key: dict[str, sqlite3.Row]) -> str:
+    """Walk parent_text_key up to the version root (parent_text_key IS NULL)."""
+    seen: set[str] = set()
+    while text_key not in seen:
+        seen.add(text_key)
+        row = rows_by_key.get(text_key)
+        if row is None or row["parent_text_key"] is None:
+            return text_key
+        text_key = row["parent_text_key"]
+    return text_key  # cycle guard; should not happen on well-formed data
+
+
+def _legal_text_sort_key(version: dict[str, Any]) -> tuple[str, int]:
+    root_text_key = version["root_text_key"]
+    try:
+        numeric_key = int(root_text_key)
+    except (TypeError, ValueError):
+        numeric_key = 0
+    return (version["valid_from"] or "", numeric_key)
+
+
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-def get_legal_text(text_key: str) -> dict[str, Any] | None:
+def get_legal_text(text_key: str, latest_only: bool = True) -> dict[str, Any] | None:
     """
     Fetch reimbursement law text, by either of two key formats:
 
     - a legal_text.text_key primary key (e.g. '40869') - returns that single
-      text node: content in French and Dutch, text type, sequence number and
-      the parent legal reference/basis for context.
+      text node: content in French and Dutch, text type, sequence number,
+      validity period and the parent legal reference/basis for context.
     - a legal_reference path, i.e. the exact string found in
       get_reimbursement's `legal_reference` field (e.g. 'RD20180201-IV-2630000',
       shaped "{legal_basis.key}-{chapter}-{paragraph}") - resolves the
-      chapter/paragraph and returns every legal_text point under it, in
-      sequence, as `texts`.
+      chapter/paragraph and returns its text as `versions`: one entry per
+      historical revision of that paragraph, each `{root_text_key,
+      valid_from, valid_to, texts: [...]}` with `texts` in sequence order.
+      A paragraph amended over the years accumulates several parallel text
+      trees in legal_text (e.g. one root per revision, each root's own
+      subtree renumbering sequence_nr from 1) -- grouping by root keeps a
+      2020 revision from interleaving with the 2024 one that superseded it.
+      `latest_only=True` (default) returns only the most recent version;
+      set it to False to see the full amendment history. "Most recent" is
+      determined by `valid_from` descending (every legal_text row in this
+      DB build has it populated); ties -- or a future build where it is
+      NULL -- fall back to root_text_key descending, since higher keys are
+      assigned later.
       Note: some chapters carry no conditional text at all - e.g. Chapter I
       ('...-I-...') is the base reimbursement category with no special
-      conditions, so `texts` is legitimately an empty list for it. That is
-      not a lookup failure.
+      conditions, so each version's `texts` is legitimately an empty list.
+      That is not a lookup failure.
 
     Returns None only when the key matches neither a legal_text.text_key nor
     a resolvable legal_basis in a 3-part path.
@@ -789,24 +887,44 @@ def get_legal_text(text_key: str) -> dict[str, Any] | None:
                     " WHERE basis_key = ? AND ref_key = ? AND parent_ref_key = ?",
                     (basis_key, paragraph, chapter),
                 ).fetchone()
-                texts = [_row_to_dict(r) for r in conn.execute(
+                rows = conn.execute(
                     "SELECT basis_key, ref_key, text_key, parent_text_key,"
-                    " content_fr, content_nl, type, sequence_nr"
+                    " content_fr, content_nl, type, sequence_nr, valid_from, valid_to"
                     " FROM legal_text WHERE basis_key = ? AND ref_key = ?"
                     " ORDER BY sequence_nr",
                     (basis_key, paragraph),
-                ).fetchall()]
+                ).fetchall()
+
+                rows_by_key = {r["text_key"]: r for r in rows}
+                grouped: dict[str, list[sqlite3.Row]] = {}
+                for r in rows:
+                    root = _legal_text_root(r["text_key"], rows_by_key)
+                    grouped.setdefault(root, []).append(r)
+
+                versions = []
+                for root_text_key, group_rows in grouped.items():
+                    root_row = rows_by_key.get(root_text_key)
+                    versions.append({
+                        "root_text_key": root_text_key,
+                        "valid_from": root_row["valid_from"] if root_row else None,
+                        "valid_to":   root_row["valid_to"] if root_row else None,
+                        "texts": [_row_to_dict(r) for r in group_rows],
+                    })
+                versions.sort(key=_legal_text_sort_key, reverse=True)
+                if latest_only and versions:
+                    versions = versions[:1]
+
                 return {
                     "basis_key": basis_key,
                     "chapter": chapter,
                     "paragraph": paragraph,
                     "reference_title_fr": ref_row["title_fr"] if ref_row else None,
                     "reference_title_nl": ref_row["title_nl"] if ref_row else None,
-                    "texts": texts,
+                    "versions": versions,
                 }
         row = conn.execute(
             "SELECT basis_key, ref_key, text_key, parent_text_key,"
-            " content_fr, content_nl, type, sequence_nr"
+            " content_fr, content_nl, type, sequence_nr, valid_from, valid_to"
             " FROM legal_text WHERE text_key = ?",
             (key,),
         ).fetchone()
@@ -866,6 +984,10 @@ def get_cbip_notes(cnk: str) -> dict[str, Any] | None:
 
     Returns None if neither a pack-level nor a product-level match exists
     (the CBIP curates a subset of all SAM medicines).
+
+    Looking up several CNKs at once? get_pack_overview batches this together
+    with get_reimbursement in a single call instead of one get_cbip_notes
+    call per CNK.
     """
     cnk = cnk.strip()
     with db() as conn:
@@ -959,6 +1081,217 @@ def get_cbip_notes(cnk: str) -> dict[str, Any] | None:
         ).fetchall()]
         result["substances"] = substances
         return result
+
+
+def _pack_identities(conn: sqlite3.Connection, cnks: list[str]) -> dict[str, dict[str, Any]]:
+    """Batched identity lookup: one query for all requested CNKs, not one per CNK."""
+    placeholders = ",".join("?" * len(cnks))
+    rows = conn.execute(
+        f"""
+        SELECT d.cnk, a.code AS amp_code, a.name_fr, a.name_nl, a.company, a.status,
+               c.pharma_form_fr, c.pharma_form_nl, c.route_fr, c.route_nl,
+               p.pack_display_fr, p.pack_display_nl, p.delivery_modus, p.ex_factory_price
+          FROM dmpp d
+          JOIN amp a ON a.code = d.amp_code
+     LEFT JOIN ampp p ON p.cti_extended = d.cti_extended
+     LEFT JOIN amp_component c ON c.amp_code = a.code AND c.seq = 1
+         WHERE d.cnk IN ({placeholders})
+        """,
+        cnks,
+    ).fetchall()
+    return {row["cnk"]: _row_to_dict(row) for row in rows}
+
+
+def _pack_substances(conn: sqlite3.Connection, amp_codes: list[str]) -> dict[str, list[dict[str, Any]]]:
+    """Batched active-substance lookup keyed by amp_code, one query for every AMP involved."""
+    placeholders = ",".join("?" * len(amp_codes))
+    rows = conn.execute(
+        f"""
+        SELECT amp_code, substance_code, substance_name_fr, substance_name_nl,
+               strength_operator, strength_quantity, strength_unit
+          FROM amp_ingredient
+         WHERE amp_code IN ({placeholders}) AND type = 'ACTIVE_SUBSTANCE'
+         ORDER BY amp_code, component_seq, rank
+        """,
+        amp_codes,
+    ).fetchall()
+    by_amp: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        entry = _row_to_dict(row)
+        entry["strength_missing"] = entry["strength_quantity"] is None
+        by_amp.setdefault(entry.pop("amp_code"), []).append(entry)
+    return by_amp
+
+
+_CBIP_OVERVIEW_HEAD_SQL = """
+    SELECT p.mppcv,
+           p.pupr AS public_price, p."index", p.rema, p.remw, p.law, p.ssecr,
+           m.bt, m.orphan, m.narcotic, m.specrules,
+           h.hyr AS chapter_code, h.ti AS chapter_title, h.pos AS chapter_positioning
+      FROM cbip_mpp p
+      JOIN cbip_mp  m ON m.mpcv  = p.mpcv
+ LEFT JOIN cbip_hyr h ON h.hyrcv = m.hyrcv
+     WHERE p.mppcv IN ({placeholders})
+"""
+
+
+def _cbip_overview_entry(row: sqlite3.Row, coverage: str) -> dict[str, Any]:
+    entry = _row_to_dict(row)
+    entry.pop("mppcv", None)
+    entry["flags"] = {k: entry.pop(k) for k in ("bt", "orphan", "narcotic", "specrules")}
+    entry["coverage"] = coverage
+    if coverage == "product_level":
+        # Pack-specific fields have no meaning when resolved via a sibling pack.
+        for field in ("public_price", "index", "rema", "remw", "law", "ssecr"):
+            entry[field] = None
+    return entry
+
+
+def _pack_cbip(conn: sqlite3.Connection, cnks: list[str]) -> dict[str, dict[str, Any]]:
+    """Batched CBIP lookup mirroring get_cbip_notes' pack/product-level fallback.
+
+    A fixed number of queries regardless of len(cnks): one direct pack-level
+    fetch, and -- only if some CNKs miss it -- one sibling-resolution query
+    plus one more head fetch for the resolved siblings. Never one query per CNK.
+    """
+    if not _has_cbip(conn):
+        return {}
+    placeholders = ",".join("?" * len(cnks))
+    direct_rows = conn.execute(
+        _CBIP_OVERVIEW_HEAD_SQL.format(placeholders=placeholders), cnks
+    ).fetchall()
+    result = {row["mppcv"]: _cbip_overview_entry(row, "pack_level") for row in direct_rows}
+
+    missing = [cnk for cnk in cnks if cnk not in result]
+    if missing:
+        m_placeholders = ",".join("?" * len(missing))
+        sibling_rows = conn.execute(
+            f"""
+            SELECT d_req.cnk AS requested_cnk, MIN(d_sib.cnk) AS canon_cnk
+              FROM dmpp d_req
+              JOIN dmpp     d_sib ON d_sib.amp_code = d_req.amp_code
+              JOIN cbip_mpp p     ON p.mppcv        = d_sib.cnk
+             WHERE d_req.cnk IN ({m_placeholders})
+             GROUP BY d_req.cnk
+            """,
+            missing,
+        ).fetchall()
+        sibling_map = {r["requested_cnk"]: r["canon_cnk"] for r in sibling_rows}
+        if sibling_map:
+            canon_cnks = sorted(set(sibling_map.values()))
+            c_placeholders = ",".join("?" * len(canon_cnks))
+            canon_rows = conn.execute(
+                _CBIP_OVERVIEW_HEAD_SQL.format(placeholders=c_placeholders), canon_cnks
+            ).fetchall()
+            canon_by_mppcv = {row["mppcv"]: row for row in canon_rows}
+            for cnk, canon_cnk in sibling_map.items():
+                row = canon_by_mppcv.get(canon_cnk)
+                if row is not None:
+                    result[cnk] = _cbip_overview_entry(row, "product_level")
+    return result
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
+def get_pack_overview(
+    cnks: list[str], as_of: str | None = None, include_history: bool = False
+) -> dict[str, Any]:
+    """
+    Merge identity, active substances, reimbursement and CBIP data for 1-50
+    CNKs in a single call.
+
+    REPLACES the get_reimbursement + get_cbip_notes sequence once the CNKs
+    are already known: cross-referencing reimbursement against CBIP notes
+    for N packs used to cost 2N tool calls (one get_reimbursement and one
+    get_cbip_notes per CNK, one CNK at a time). This tool does it in one
+    round trip regardless of N, using a fixed, small number of batched
+    `WHERE cnk IN (...)` SQL queries -- never one query per CNK. Keep using
+    get_reimbursement / get_cbip_notes directly for single-CNK, targeted
+    lookups, or when you need the full CBIP editorial text (chapter intro,
+    product notes/positioning) that this overview deliberately omits.
+
+    Parameters
+    ----------
+    cnks : 1 to 50 CNKs.
+    as_of : ISO date controlling reimbursement currency, default today.
+        See get_reimbursement for the exact semantics.
+    include_history : if True, `reimbursement` includes every tranche ever
+        recorded (each still marked `is_current` relative to `as_of`)
+        instead of only the currently active one(s).
+
+    Returns {"packs": {cnk: {...}}, "not_found": [cnk, ...]}.
+
+    Every requested CNK gets an entry in `packs`, even one that does not
+    exist at all (all four sections then null, with
+    `..._absent_reason: "cnk_not_found"`) -- `not_found` additionally lists
+    those CNKs for a quick existence check without inspecting every section.
+
+    Each pack entry has four sections, each paired with a
+    `<section>_absent_reason` key that is null when the section is present
+    and otherwise one of "cnk_not_found", "no_reimbursement_record" (known
+    CNK, nothing reimbursed as of `as_of`), or "not_in_cbip_selection"
+    (known CNK, not curated by CBIP/BCFI -- or this DB build has no CBIP
+    data at all). A bare `null` is ambiguous for a caller deciding whether
+    it needs to double-check with the unitary tool; the reason makes that
+    unnecessary.
+
+    - identity: {amp_code, name_fr, name_nl, company, status, pharma_form_fr,
+      pharma_form_nl, route_fr, route_nl, pack_display_fr, pack_display_nl,
+      delivery_modus, ex_factory_price}. pharma_form/route reflect AMP
+      component #1 -- call get_medicine for multi-component detail.
+    - substances: list of active substances with strength (quantity/unit/
+      operator) and a `strength_missing` flag, true when the SAM source
+      export itself has no strength for that substance -- never inferred
+      from the medicine's name (see get_ingredients).
+    - reimbursement: list of currently-active tranche(s), same shape as
+      get_reimbursement -- usually a single entry, but can hold more than
+      one when several delivery environments are simultaneously active.
+    - cbip: {public_price, index, rema, remw, law, ssecr,
+      flags: {bt, orphan, narcotic, specrules}, chapter_code, chapter_title,
+      chapter_positioning, coverage}. coverage is "pack_level" or
+      "product_level" (same fallback as get_cbip_notes; pack-specific
+      fields are null at product level).
+    """
+    cnks = [c.strip() for c in cnks]
+    if not cnks or len(cnks) > 50:
+        raise ValueError("cnks must contain between 1 and 50 CNKs")
+
+    as_of_date = as_of.strip() if as_of else date.today().isoformat()
+
+    with db() as conn:
+        identities = _pack_identities(conn, cnks)
+        amp_codes = sorted({e["amp_code"] for e in identities.values()})
+        substances = _pack_substances(conn, amp_codes) if amp_codes else {}
+        reimbursements = _reimbursement_for_cnks(conn, cnks, as_of_date, include_history)
+        cbip = _pack_cbip(conn, cnks)
+
+    packs: dict[str, Any] = {}
+    not_found: list[str] = []
+    for cnk in cnks:
+        identity = identities.get(cnk)
+        if identity is None:
+            not_found.append(cnk)
+            packs[cnk] = {
+                "identity": None, "identity_absent_reason": "cnk_not_found",
+                "substances": None, "substances_absent_reason": "cnk_not_found",
+                "reimbursement": None, "reimbursement_absent_reason": "cnk_not_found",
+                "cbip": None, "cbip_absent_reason": "cnk_not_found",
+            }
+            continue
+
+        pack_reimbursement = reimbursements.get(cnk)
+        pack_cbip = cbip.get(cnk)
+        packs[cnk] = {
+            "identity": identity,
+            "identity_absent_reason": None,
+            "substances": substances.get(identity["amp_code"], []),
+            "substances_absent_reason": None,
+            "reimbursement": pack_reimbursement,
+            "reimbursement_absent_reason": None if pack_reimbursement else "no_reimbursement_record",
+            "cbip": pack_cbip,
+            "cbip_absent_reason": None if pack_cbip else "not_in_cbip_selection",
+        }
+
+    return {"packs": packs, "not_found": not_found}
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
