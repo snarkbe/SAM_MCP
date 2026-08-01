@@ -230,6 +230,10 @@ curl "http://localhost:8000/log?lines=50" # last 50 lines only
 | `SAM_LOG_LINES` | `2000` | Ring-buffer size. |
 | `SAM_LOG_TOKEN` | *(unset)* | If set, `/log` requires `?token=…` and returns **403** otherwise. Unset means open, like `/status`. |
 
+The page's tab icon is served from `/favicon.svg`, with `/favicon.ico`
+(32×32 + 16×16) as a fallback for browsers that don't take SVG favicons. Both
+ship inside the Python package.
+
 The buffer is **in memory only** — it holds the last `SAM_LOG_LINES` lines and
 starts empty after every container restart. It is not a replacement for
 `docker logs`, just a convenient window onto the same output. Requests to
